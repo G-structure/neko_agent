@@ -31,7 +31,11 @@ MAX_STEPS           = int(os.environ.get("NEKO_MAX_STEPS", 8))
 AUDIO_DEFAULT       = bool(int(os.environ.get("NEKO_AUDIO", "1")))
 FRAME_SAVE_PATH     = os.environ.get("NEKO_FRAME_SAVE_PATH", None)
 OFFLOAD_FOLDER      = os.environ.get("OFFLOAD_FOLDER", "./offload")
-
+NEKO_STUN_URL       = os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302")
+NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
+NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
+NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
+NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")  # 'all' or 'relay'
 
 ALLOWED_ACTIONS = {
     "CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY",
@@ -539,7 +543,7 @@ class NekoAgent:
         ice_servers = []
         for srv in ice_servers_payload:
             ice_servers.append(RTCIceServer(
-                urls=srv["urls"],
+                urls=srv[""],
                 username=srv.get("username"),
                 credential=srv.get("credential"),
             ))
@@ -660,7 +664,7 @@ class NekoAgent:
             inference failed.
         :rtype: Optional[Dict[str,Any]]
         """
-        content = [
+        content: List[Dict[str, Any]] = [
             {"type":"text","text":self.sys_prompt},
             {"type":"text","text":f"Task: {self.nav_task}"},
         ]
