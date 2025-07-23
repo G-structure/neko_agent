@@ -633,6 +633,7 @@ class NekoAgent:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self.shutdown.set)
+        #TODO: Fix chating with agent
         # start chat consumer
         self.chat_task = asyncio.create_task(self._consume_chat())
         while not self.shutdown.is_set():
@@ -921,7 +922,8 @@ class NekoAgent:
             logger.info("[ANSWER] %r", val)
         else:
             logger.warning("Unsupported action: %r", action)
-
+    
+    #TODO: fix chat consumer
     async def _consume_chat(self):
         """Consume incoming chat messages and update the task."""
         try:
