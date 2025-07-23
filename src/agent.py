@@ -59,6 +59,23 @@ logging.basicConfig(
     format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
 )
 
+# Add a file handler if NEKO_LOGFILE environment variable is set
+neko_logfile = os.environ.get("NEKO_LOGFILE")
+if neko_logfile:
+    try:
+        # Use the same formatter for the file handler for consistency
+        log_format = '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
+        formatter = logging.Formatter(log_format)
+
+        file_handler = logging.FileHandler(neko_logfile)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        # Log this info message to both console and the new file
+        logger.info(f"Neko agent logging to file: {neko_logfile}")
+    except Exception as e:
+        logger.error(f"Failed to set up file logging to {neko_logfile}: {e}")
+
+
 ACTION_SPACES = {
     "web":   ["CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY"],
     "phone": ["INPUT","SWIPE","TAP","ANSWER","ENTER"],
@@ -517,6 +534,8 @@ class NekoAgent:
         self.run_id     = os.environ.get("NEKO_RUN_ID") or str(uuid.uuid4())[:8]
         self.pc:Optional[RTCPeerConnection] = None
         self.shutdown   = asyncio.Event()
+        self.chat_queue = asyncio.Queue()
+        self.chat_queue = asyncio.Queue()
         self.loop       = asyncio.get_event_loop()
         self.ice_task   = None
         self.is_lite    = False
@@ -539,6 +558,10 @@ class NekoAgent:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self.shutdown.set)
+        # start chat consumer
+        self.chat_task = asyncio.create_task(self._consume_chat())  # handle chat inputs oaicite:websockets-recv
+        # start chat consumer
+        self.chat_task = asyncio.create_task(self._consume_chat())  # handle chat inputs oaicite:websockets-recv
         while not self.shutdown.is_set():
             reconnects.inc()
             try:
@@ -826,6 +849,19 @@ class NekoAgent:
         else:
             logger.warning("Unsupported action: %r", action)
 
+    async def _consume_chat(self):
+        """Consume incoming chat messages and update the task."""
+        try:
+            while not self.shutdown.is_set():
+                msg = await self.signaler.recv()
+                if msg.get("event") == "chat/message":
+                    content = (msg.get("payload") or {}).get("content") or msg.get("content")
+                    if content:
+                        logger.info(f"Chat update received: {content}")
+                        self.nav_task = content                        # switch to new task dynamically oaicite:asyncio-concurrency
+        except asyncio.CancelledError:
+            pass
+
     async def _on_ice(self, cand: RTCIceCandidate) -> None:
         """Handles the generation of local ICE candidates and sends them
         to the Neko server via the WebSocket.
@@ -867,6 +903,10 @@ class NekoAgent:
             await self.signaler.ws.close()
         if self.frame_source:
             await self.frame_source.stop()
+        if hasattr(self, 'chat_task'):
+            self.chat_task.cancel()                                   # stop chat consumer
+        if hasattr(self, 'chat_task'):
+            self.chat_task.cancel()                                   # stop chat consumer
 
     async def _on_track(self, track: VideoStreamTrack) -> None:
         """Handles incoming media tracks from the WebRTC PeerConnection.
