@@ -1,4 +1,3 @@
-# overlays/pylibsrtp.nix
 self: super: {
   python3Packages = super.python3Packages // {
     pylibsrtp = super.python3Packages.buildPythonPackage rec {
@@ -14,10 +13,10 @@ self: super: {
       };
 
       nativeBuildInputs = [
-        super.pkgconf        # <-- use pkgconf here
+        super.pkgconf
       ];
       buildInputs = [
-        super.srtp        # the C library with headers
+        super.srtp
         super.openssl
       ];
 
