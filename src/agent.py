@@ -22,6 +22,7 @@ from PIL import Image
 from abc import ABC, abstractmethod
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from prometheus_client import start_http_server, Counter, Histogram
+import ast
 
 logging.getLogger("aiortc").setLevel(logging.DEBUG)
 
@@ -131,7 +132,18 @@ def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[st
     :rtype: Optional[Dict[str,Any]]
     """
     try:
+        # First, try to parse as strict JSON
         act = json.loads(output_text)
+    except json.JSONDecodeError:
+        # If JSON fails, try to evaluate as a Python literal
+        try:
+            act = ast.literal_eval(output_text)
+        except (ValueError, SyntaxError) as e:
+            logger.error("Failed to parse as JSON or Python literal: %s | Raw: %r", e, output_text)
+            parse_errors.inc()
+            return None
+
+    try:
         assert isinstance(act, dict)
         typ = act.get("action")
         if typ not in ACTION_SPACES[nav_mode]:
@@ -141,8 +153,8 @@ def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[st
         for k in ("action","value","position"):
             assert k in act, f"Missing key {k}"
         return act
-    except (json.JSONDecodeError, AssertionError) as e:
-        logger.error("Parse/schema error: %s | Raw: %r", e, output_text)
+    except AssertionError as e:
+        logger.error("Schema validation error: %s | Parsed: %r", e, act)
         parse_errors.inc()
         return None
 
@@ -535,7 +547,6 @@ class NekoAgent:
         self.pc:Optional[RTCPeerConnection] = None
         self.shutdown   = asyncio.Event()
         self.chat_queue = asyncio.Queue()
-        self.chat_queue = asyncio.Queue()
         self.loop       = asyncio.get_event_loop()
         self.ice_task   = None
         self.is_lite    = False
@@ -559,9 +570,7 @@ class NekoAgent:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self.shutdown.set)
         # start chat consumer
-        self.chat_task = asyncio.create_task(self._consume_chat())  # handle chat inputs oaicite:websockets-recv
-        # start chat consumer
-        self.chat_task = asyncio.create_task(self._consume_chat())  # handle chat inputs oaicite:websockets-recv
+        self.chat_task = asyncio.create_task(self._consume_chat())
         while not self.shutdown.is_set():
             reconnects.inc()
             try:
@@ -855,10 +864,23 @@ class NekoAgent:
             while not self.shutdown.is_set():
                 msg = await self.signaler.recv()
                 if msg.get("event") == "chat/message":
-                    content = (msg.get("payload") or {}).get("content") or msg.get("content")
-                    if content:
-                        logger.info(f"Chat update received: {content}")
-                        self.nav_task = content                        # switch to new task dynamically oaicite:asyncio-concurrency
+                    payload = msg.get("payload", {})
+                    task_update = None
+
+                    # Case 1 & 2: Extract from `payload.content` which can be a string or a dict
+                    content = payload.get("content")
+                    if isinstance(content, dict):
+                        task_update = content.get("text")  # `content: {"text": "..."}`
+                    elif isinstance(content, str):
+                        task_update = content              # `content: "..."`
+
+                    # Case 3 & 4: Fallback to other keys if content is not present/valid
+                    if not task_update:
+                        task_update = payload.get("text") or payload.get("message")
+
+                    if task_update and isinstance(task_update, str):
+                        logger.info(f"Chat update received: {task_update}")
+                        self.nav_task = task_update
         except asyncio.CancelledError:
             pass
 
@@ -904,9 +926,7 @@ class NekoAgent:
         if self.frame_source:
             await self.frame_source.stop()
         if hasattr(self, 'chat_task'):
-            self.chat_task.cancel()                                   # stop chat consumer
-        if hasattr(self, 'chat_task'):
-            self.chat_task.cancel()                                   # stop chat consumer
+            self.chat_task.cancel()       # stop chat consumer
 
     async def _on_track(self, track: VideoStreamTrack) -> None:
         """Handles incoming media tracks from the WebRTC PeerConnection.
