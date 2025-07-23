@@ -7,7 +7,6 @@ Env vars: NEKO_URL, NEKO_USER, NEKO_PASS, NEKO_WS, etc.
 import os, sys, asyncio, json, signal, logging, random, uuid, contextlib
 from typing import Any, Dict, List, Optional, Tuple
 
-import os
 import torch
 import websockets
 import requests
@@ -18,13 +17,16 @@ from aiortc import (
     RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
 )
 from aiortc.sdp import candidate_from_sdp
-from PIL import Image
+from PIL import Image, ImageFile
 from abc import ABC, abstractmethod
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from prometheus_client import start_http_server, Counter, Histogram
 import ast
 
 logging.getLogger("aiortc").setLevel(logging.DEBUG)
+
+# Configure PIL to fail fast on truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = False
 
 MODEL_KEY           = os.environ.get("MODEL_KEY", "showui-2b")
 REPO_ID             = os.environ.get("REPO_ID", "showlab/ShowUI-2B")
@@ -205,6 +207,44 @@ def resize_and_validate_image(image:Image.Image) -> Image.Image:
         logger.info(f"Resized {ow}×{oh}→{nw}×{nh}")
     return image
 
+def pil_from_frame(frame):
+    """Converts a video frame to a validated PIL Image.
+
+    This function takes a video frame, converts it to a PIL Image,
+    validates its integrity, and returns a copy to detach the buffer.
+
+    :param frame: The video frame object received from an `aiortc.VideoStreamTrack`.
+    :returns: A validated Pillow `Image.Image` object in "RGB" mode.
+    """
+    img = frame.to_image()
+    # Validate image dimensions
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        raise ValueError(f"Invalid image dimensions: {w}x{h}")
+
+    # Convert to RGB and return a copy to detach buffer
+    return img.convert("RGB").copy()
+
+def save_atomic(img, path):
+    """Save image atomically to prevent truncated files.
+
+    This function saves an image to a temporary file first, then
+    atomically moves it to the target path.
+
+    :param img: The PIL Image to save.
+    :param path: The target path to save the image to.
+    """
+    tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        img.save(tmp, format="PNG")
+        os.replace(tmp, path)  # atomic on POSIX
+        logger.info(f"Saved frame atomically to {path}")
+    except Exception as e:
+        # Clean up temporary file if it exists
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise e
+
 def frame_to_pil_image(frame:VideoStreamTrack) -> Image.Image:
     """Converts a video frame from `aiortc.VideoStreamTrack` to a PIL Image.
 
@@ -220,17 +260,19 @@ def frame_to_pil_image(frame:VideoStreamTrack) -> Image.Image:
     :rtype: Image.Image
     """
     logger.info("Decoding frame to PIL image...")
-    img = frame.to_image()
-    logger.info("Frame decoded successfully.")
-    logger.info(f"frame_to_pil_image: Got image {img.size}, mode {img.mode}")
-    if FRAME_SAVE_PATH is not None:
-        try:
-            img.save(FRAME_SAVE_PATH)
-
-            logger.info(f"Saved frame to {FRAME_SAVE_PATH}")
-        except Exception as e:
-            logger.error(f"Error saving frame to {FRAME_SAVE_PATH}: {e}")
-    return img.convert("RGB") if img.mode!="RGB" else img
+    try:
+        img = pil_from_frame(frame)
+        logger.info("Frame decoded and validated successfully.")
+        logger.info(f"frame_to_pil_image: Got image {img.size}, mode {img.mode}")
+        if FRAME_SAVE_PATH is not None:
+            try:
+                save_atomic(img, FRAME_SAVE_PATH)
+            except Exception as e:
+                logger.error(f"Error saving frame to {FRAME_SAVE_PATH}: {e}")
+        return img
+    except Exception as e:
+        logger.error(f"Error decoding or validating frame: {e}")
+        raise
 
 class Signaler:
     """Manages WebSocket connections and signaling for the Neko agent.
@@ -358,16 +400,19 @@ class WebRTCFrameSource(FrameSource):
         self.lock = asyncio.Lock()
         self.first_frame = asyncio.Event()
 
-    async def start(self, track: VideoStreamTrack) -> None:
+    async def start(self, *args: Any) -> None:
         """Starts or restarts the frame reader for a given video track.
 
         If a reader task is already running, it will be stopped before
         a new one is created for the provided `track`. This ensures
         only one reader is active at a time.
 
-        :param track: The `aiortc.VideoStreamTrack` to read frames from.
-        :type track: VideoStreamTrack
+        :param args: The arguments. First argument should be the `aiortc.VideoStreamTrack` to read frames from.
         """
+        if not args:
+            raise ValueError("WebRTCFrameSource.start() requires a VideoStreamTrack argument")
+
+        track = args[0]
         await self.stop()
         logger.info(f"WebRTCFrameSource: starting reader for track {track}")
         self.task = asyncio.create_task(self._reader(track))
@@ -455,8 +500,27 @@ class LiteFrameSource(FrameSource):
                 if not data:
                     continue
                 try:
-                    img_bytes = base64.b64decode(data)
+                    # Validate and decode base64 data
+                    img_bytes = base64.b64decode(data, validate=True)
+
+                    # Check for valid image headers
+                    if not img_bytes.startswith(b"\x89PNG") and not img_bytes.startswith(b"\xff\xd8\xff"):
+                        logger.warning("Bad image header, skipping frame")
+                        continue
+
+                    # Open and verify image integrity
+                    img = Image.open(io.BytesIO(img_bytes))
+                    img.verify()  # Ensure full file integrity
+
+                    # Re-open after verify (PIL requirement)
                     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+                    # Validate image dimensions
+                    w, h = img.size
+                    if w <= 0 or h <= 0:
+                        logger.warning("Invalid image dimensions: %dx%d, skipping frame", w, h)
+                        continue
+
                     async with self._lock:
                         self.image = img
                     frames_received.inc()
