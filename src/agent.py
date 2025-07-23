@@ -11,12 +11,15 @@ import os
 import torch
 import websockets
 import requests
+import base64
+import io
 from aiortc import (
     RTCConfiguration, RTCIceServer, RTCPeerConnection,
     RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
 )
 from aiortc.sdp import candidate_from_sdp
 from PIL import Image
+from abc import ABC, abstractmethod
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from prometheus_client import start_http_server, Counter, Histogram
 
@@ -36,8 +39,9 @@ NEKO_STUN_URL       = os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19
 NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
 NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
 NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
-NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")  # 'all' or 'relay'
+NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")
 NEKO_FORCE_TCP      = os.environ.get("NEKO_FORCE_TCP","0") == "1"
+FORCE_LITE_MODE     = os.environ.get("FORCE_LITE_MODE", "0").lower() in ("1", "true")
 
 ALLOWED_ACTIONS = {
     "CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY",
@@ -285,14 +289,29 @@ class Signaler:
             data = await self.ws.recv()
         return json.loads(data)
 
-class FrameSaver:
-    """Continuously reads frames from a video track and keeps the latest image.
 
-    This class is responsible for asynchronously receiving video frames from
-    an `aiortc.VideoStreamTrack`, converting them into PIL Image objects,
-    and storing only the most recently received image. It uses an internal
-    lock to ensure thread-safe access to the image and provides methods
-    to start, stop, and retrieve the current image.
+class FrameSource(ABC):
+    """Abstract interface for screen/frame sources."""
+
+    @abstractmethod
+    async def start(self, *args: Any) -> None:
+        ...
+
+    @abstractmethod
+    async def stop(self) -> None:
+        ...
+
+    @abstractmethod
+    async def get(self) -> Optional[Image.Image]:
+        ...
+
+
+class WebRTCFrameSource(FrameSource):
+    """Continuously reads frames from a WebRTC video track and stores the latest.
+
+    This implementation is a thin wrapper around a reader task that pulls
+    frames from an `aiortc.VideoStreamTrack` and keeps only the most recent
+    PIL Image in memory.
 
     :ivar image: The latest PIL Image received from the video track, or None if no frame has been received or the reader is stopped.
     :vartype image: Optional[Image.Image]
@@ -305,13 +324,13 @@ class FrameSaver:
     """
 
     def __init__(self) -> None:
-        """Initializes the FrameSaver with no image, task, and sets up a lock and event."""
+        """Initializes the source with no image, task, and sets up a lock and event."""
         self.image: Optional[Image.Image] = None
         self.task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
         self.first_frame = asyncio.Event()
 
-    async def update(self, track: VideoStreamTrack) -> None:
+    async def start(self, track: VideoStreamTrack) -> None:
         """Starts or restarts the frame reader for a given video track.
 
         If a reader task is already running, it will be stopped before
@@ -322,7 +341,7 @@ class FrameSaver:
         :type track: VideoStreamTrack
         """
         await self.stop()
-        logger.info(f"FrameSaver: starting reader for track {track}")
+        logger.info(f"WebRTCFrameSource: starting reader for track {track}")
         self.task = asyncio.create_task(self._reader(track))
 
     async def stop(self) -> None:
@@ -374,6 +393,52 @@ class FrameSaver:
         async with self.lock:
             return self.image
 
+
+class LiteFrameSource(FrameSource):
+    """Frame source for WebSocket-lite mode streaming base64 images."""
+
+    def __init__(self, signaler: Signaler) -> None:
+        self.signaler = signaler
+        self.image: Optional[Image.Image] = None
+        self._running = False
+        self._lock = asyncio.Lock()
+        self._task: Optional[asyncio.Task] = None
+
+    async def start(self, *args: Any) -> None:
+        self._running = True
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+    async def _run(self) -> None:
+        while self._running and self.signaler.ws:
+            try:
+                msg = await self.signaler.recv()
+            except Exception:
+                break
+            if msg.get("event") == "signal/video":
+                data = msg.get("data")
+                if not data:
+                    continue
+                try:
+                    img_bytes = base64.b64decode(data)
+                    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                    async with self._lock:
+                        self.image = img
+                    frames_received.inc()
+                except Exception as e:
+                    logger.warning("Failed to decode lite frame: %s", e)
+
+    async def get(self) -> Optional[Image.Image]:
+        async with self._lock:
+            return self.image
+
 class NekoAgent:
     """Manages the Neko WebRTC agent's lifecycle, including signaling, WebRTC
     connection, video frame processing, and AI model inference for navigation.
@@ -385,8 +450,9 @@ class NekoAgent:
 
     :ivar signaler: Handles WebSocket communication for signaling.
     :vartype signaler: Signaler
-    :ivar frames: Stores the latest video frame received from the WebRTC track.
-    :vartype frames: FrameSaver
+    :ivar frame_source: Active source for retrieving screen frames in either
+        WebRTC or lite mode.
+    :vartype frame_source: FrameSource
     :ivar nav_task: The specific task instruction for the navigation agent.
     :vartype nav_task: str
     :ivar nav_mode: The operational mode, either "web" or "phone", determining
@@ -442,7 +508,7 @@ class NekoAgent:
         :type audio: bool
         """
         self.signaler   = Signaler(ws_url)
-        self.frames     = FrameSaver()
+        self.frame_source: Optional[FrameSource] = None
         self.nav_task   = nav_task
         self.nav_mode   = nav_mode
         self.max_steps  = max_steps
@@ -454,6 +520,7 @@ class NekoAgent:
         self.shutdown   = asyncio.Event()
         self.loop       = asyncio.get_event_loop()
         self.ice_task   = None
+        self.is_lite    = False
 
         self.sys_prompt = _NAV_SYSTEM.format(
             _APP=self.nav_mode,
@@ -478,14 +545,16 @@ class NekoAgent:
             try:
                 async with await self.signaler.connect_with_backoff() as ws:
                     self.signaler.ws = ws
-                    await self._setup_webrtc()
-                    self.ice_task = asyncio.create_task(self._consume_remote_ice())
+                    await self._setup_media()
+                    if not self.is_lite:
+                        self.ice_task = asyncio.create_task(self._consume_remote_ice())
                     try:
                         await self._main_loop()
                     finally:
-                        self.ice_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await self.ice_task
+                        if self.ice_task:
+                            self.ice_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await self.ice_task
             except Exception as e:
                 logger.error(json.dumps({
                     "phase":"connect","run":self.run_id,"msg":f"WS/RTC error: {e}"
@@ -498,17 +567,24 @@ class NekoAgent:
 # Is the test neko server returning the correct ICE Candidates and are we able to fetch them with `ice_servers_payload`?
 # Make sure the WebRTC setup flow is correct, webrtc is working in the webapp so it must be possible to establish connection
 # with the python agent we have here.
-    async def _setup_webrtc(self) -> None:
-        """Sets up the WebRTC PeerConnection with the Neko server.
+    async def _setup_media(self) -> None:
+        if FORCE_LITE_MODE:
+            logger.info("Lite/WebSocket mode is FORCED via environment variable.")
+            self.is_lite = True
+            # Start the listener *before* we request data from the server.
+            self.frame_source = LiteFrameSource(self.signaler)
+            await self.frame_source.start()
 
-        This internal method sends a media request over the WebSocket,
-        waits for an SDP offer (or provide) containing ICE server information,
-        configures the `RTCPeerConnection`, sets up event listeners for
-        WebRTC state changes (ICE, connection, signaling, track),
-        sets the remote description, creates and sets the local answer,
-        and sends the answer back to the server.
-        """
-        # Send media request and wait for offer/provide which contains ICE servers
+            # Now, trigger the server to send us the stream info.
+            req = {"video": {"width": 1280, "height": 720, "frameRate": 30}}
+            if self.audio:
+                req["audio"] = {}
+            logger.info("Sending signal/request with payload: %r", req)
+            await self.signaler.send({"event": "signal/request", "payload": req})
+            await self.signaler.send({"event": "session/watch", "payload": {"id": "main"}})
+            # Exit this function immediately, letting LiteFrameSource handle all subsequent messages.
+            return
+        """Sets up media streaming with the Neko server (WebRTC or lite)."""
         req = {
             "video": {"width": 1280, "height": 720, "frameRate": 30}
         }
@@ -519,17 +595,26 @@ class NekoAgent:
         await self.signaler.send({"event": "session/watch", "payload": {"id": "main"}})
 
         offer_msg = None
-        while True:
+        buffered_candidates = []
+        while not offer_msg:
             msg = await self.signaler.recv()
             ev  = msg.get("event")
             if ev in ("signal/offer", "signal/provide"):
                 offer_msg = msg
-                break
-            elif ev == "system/init":
-                logger.info("Ignoring system/init, waiting for offer/provide with ICE servers.")
-                continue
+            elif ev == "signal/candidate":
+                logger.info("Buffering early ICE candidate.")
+                buffered_candidates.append(msg)
+            else:
+                logger.info("Ignoring event during setup: %s", ev)
 
         payload = offer_msg.get("payload", offer_msg)
+
+        self.is_lite = bool(os.environ.get("FORCE_LITE_MODE") or offer_msg.get("lite") or payload.get("lite"))
+        if self.is_lite:
+            logger.info("Lite/WebSocket mode detected: using WebSocket image streaming.")
+            self.frame_source = LiteFrameSource(self.signaler)
+            await self.frame_source.start()
+            return
 
         ice_payload = (
             payload.get("ice")
@@ -549,7 +634,6 @@ class NekoAgent:
             for srv in ice_payload
         ]
 
-        # — 2) Merge in env-driven fallbacks —————————————————————
         ice_servers.append(RTCIceServer(urls=[NEKO_STUN_URL]))
         if NEKO_TURN_URL:
             ice_servers.append(RTCIceServer(
@@ -558,29 +642,47 @@ class NekoAgent:
                 credential=NEKO_TURN_PASS,
             ))
 
-        # — 3) Build config with chosen policy ——————————————————
-        config = RTCConfiguration(
-            iceServers=ice_servers,
-            iceTransportPolicy=NEKO_ICE_POLICY,
-        )
+        config = RTCConfiguration(iceServers=ice_servers)
         pc = RTCPeerConnection(config)
         self.pc = pc
+        self.frame_source = WebRTCFrameSource()
 
-        # — 4) Instrument ICE state logging ————————————————————
-        for ev in (
-            "icegatheringstatechange",
-            "iceconnectionstatechange",
-            "connectionstatechange",
-            "signalingstatechange",
-        ):
-            pc.on(ev, lambda e=ev, p=pc: logger.info(f"{e} → {getattr(p, e.replace('statechange','State'))}"))
-        pc.on("icecandidate", lambda c: logger.debug("Local ICE → %s", c))
+        # Setup event listeners
+        pc.on("iceconnectionstatechange", lambda: logger.info(f"iceConnectionState → {pc.iceConnectionState}"))
+        pc.on("connectionstatechange", lambda: logger.info(f"connectionState → {pc.connectionState}"))
         pc.on("icecandidate", lambda c: asyncio.create_task(self._on_ice(c)))
-        pc.on("track",       lambda t: asyncio.create_task(self._on_track(t)))
+        pc.on("track", lambda t: asyncio.create_task(self._on_track(t)))
 
         await pc.setRemoteDescription(
             RTCSessionDescription(sdp=payload["sdp"], type=payload.get("type","offer"))
         )
+
+        # Process buffered candidates now that remote description is set
+        # for cand_msg in buffered_candidates:
+        #     p = cand_msg["payload"]
+        #     cand = p.get("candidate")
+        #     if not cand: continue
+        #     ice = RTCIceCandidate(
+        #         candidate=cand,
+        #         sdpMid=p.get("sdpMid"),
+        #         sdpMLineIndex=p.get("sdpMLineIndex")
+        #     )
+        #     try:
+        #         await self.pc.addIceCandidate(ice)
+        #         logger.info("\u2705 Added buffered ICE candidate")
+        #     except Exception as e:
+        #         logger.warning("\u26a0\ufe0f addIceCandidate (buffered) failed: %s", e)
+        # Process buffered candidates now that remote description is set
+        for cand_msg in buffered_candidates:
+            ice = self._parse_remote_candidate(cand_msg["payload"])
+            if ice and self.pc:
+                try:
+                    await self.pc.addIceCandidate(ice)
+                    logger.info("\u2705 Added buffered ICE candidate")
+                except Exception as e:
+                    logger.warning("\u26a0\ufe0f addIceCandidate (buffered) failed: %s", e)
+
+
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await self.signaler.send({
@@ -603,30 +705,40 @@ class NekoAgent:
                 msg = await self.signaler.recv(timeout=60)
             except asyncio.TimeoutError:
                 continue
+            # if msg.get("event") == "signal/candidate":
+            #     p = msg["payload"]
+            #     cand = p.get("candidate")
+            #     if not cand or not self.pc:
+            #         continue
+
+            #     parsed = None
+            #     if NEKO_FORCE_TCP:
+            #         raw = cand.split(":",1)[1] if cand.startswith("candidate:") else cand
+            #         parsed = candidate_from_sdp(raw)
+            #         if parsed.protocol.lower() != "tcp":
+            #             logger.debug("\u23f9\ufe0f Skipping non-TCP candidate: %s", parsed)
+            #             continue
+
+            #     ice = RTCIceCandidate(
+            #         candidate=cand,
+            #         sdpMid=p.get("sdpMid"),
+            #         sdpMLineIndex=p.get("sdpMLineIndex")
+            #     )
+            #     try:
+            #         await self.pc.addIceCandidate(ice)
+            #         logger.info("\u2705 Added ICE candidate (%s)", getattr(parsed, "protocol", "<unknown>"))
+            #     except Exception as e:
+            #         logger.warning("\u26a0\ufe0f addIceCandidate failed: %s", e)
+            # elif msg.get("event") == "signal/close":
+            #     break
             if msg.get("event") == "signal/candidate":
-                p = msg["payload"]
-                cand = p.get("candidate")
-                if not cand or not self.pc:
-                    continue
-
-                parsed = None
-                if NEKO_FORCE_TCP:
-                    raw = cand.split(":",1)[1] if cand.startswith("candidate:") else cand
-                    parsed = candidate_from_sdp(raw)
-                    if parsed.protocol.lower() != "tcp":
-                        logger.debug("\u23f9\ufe0f Skipping non-TCP candidate: %s", parsed)
-                        continue
-
-                ice = RTCIceCandidate(
-                    candidate=cand,
-                    sdpMid=p.get("sdpMid"),
-                    sdpMLineIndex=p.get("sdpMLineIndex")
-                )
-                try:
-                    await self.pc.addIceCandidate(ice)
-                    logger.info("\u2705 Added ICE candidate (%s)", getattr(parsed, "protocol", "<unknown>"))
-                except Exception as e:
-                    logger.warning("\u26a0\ufe0f addIceCandidate failed: %s", e)
+                ice = self._parse_remote_candidate(msg["payload"]) # Use the helper
+                if ice and self.pc:
+                    try:
+                        await self.pc.addIceCandidate(ice)
+                        logger.info("\u2705 Added ICE candidate")
+                    except Exception as e:
+                        logger.warning("\u26a0\ufe0f addIceCandidate failed: %s", e)
             elif msg.get("event") == "signal/close":
                 break
 
@@ -644,7 +756,10 @@ class NekoAgent:
         step = 0
         while not self.shutdown.is_set() and step < self.max_steps:
             navigation_steps.inc()
-            img = await self.frames.get()
+            if not self.frame_source:
+                await asyncio.sleep(0.01)
+                continue
+            img = await self.frame_source.get()
             if img is None:
                 await asyncio.sleep(0.01)
                 continue
@@ -804,24 +919,41 @@ class NekoAgent:
             self.pc = None
         if self.signaler.ws:
             await self.signaler.ws.close()
-        await self.frames.stop()
+        if self.frame_source:
+            await self.frame_source.stop()
 
     async def _on_track(self, track: VideoStreamTrack) -> None:
         """Handles incoming media tracks from the WebRTC PeerConnection.
 
         This internal method is called as a callback when a new media track
         is received via WebRTC. If the track is a video track, it updates
-        the `FrameSaver` to begin processing frames from this track. Other
+        the active :class:`WebRTCFrameSource` to begin processing frames from
+        this track. Other
         track kinds are currently ignored.
 
         :param track: The incoming `MediaStreamTrack` object.
         :type track: VideoStreamTrack
         """
         logger.info(f"RTC: Received track: kind={track.kind}, id={track.id}")
-        if track.kind == "video":
-            await self.frames.update(track)
+        if track.kind == "video" and isinstance(self.frame_source, WebRTCFrameSource):
+            await self.frame_source.start(track)
         else:
             logger.info(f"RTC: Ignoring non-video track: kind={track.kind}")
+
+    def _parse_remote_candidate(self, payload: Dict[str, Any]) -> Optional[RTCIceCandidate]:
+        """Parses an ICE candidate from a WebSocket message payload."""
+        cand_str = payload.get("candidate")
+        if not cand_str:
+            return None
+
+        # The candidate_from_sdp helper expects the raw value, without the "candidate:" prefix.
+        if cand_str.startswith("candidate:"):
+            cand_str = cand_str.split(":", 1)[1]
+
+        ice = candidate_from_sdp(cand_str)
+        ice.sdpMid = payload.get("sdpMid")
+        ice.sdpMLineIndex = payload.get("sdpMLineIndex")
+        return ice
 
 async def main() -> None:
     """Entry point for the Neko WebRTC agent.
