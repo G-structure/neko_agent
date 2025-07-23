@@ -33,15 +33,13 @@ DEFAULT_WS          = os.environ.get("NEKO_WS", "wss://neko.example.com/api/ws")
 DEFAULT_METRIC_PORT = int(os.environ.get("NEKO_METRICS_PORT", 9000))
 MAX_STEPS           = int(os.environ.get("NEKO_MAX_STEPS", 8))
 AUDIO_DEFAULT       = bool(int(os.environ.get("NEKO_AUDIO", "1")))
-FRAME_SAVE_PATH     = os.environ.get("NEKO_FRAME_SAVE_PATH", None)
+FRAME_SAVE_PATH     = os.environ.get("FRAME_SAVE_PATH", None)
 OFFLOAD_FOLDER      = os.environ.get("OFFLOAD_FOLDER", "./offload")
 NEKO_STUN_URL       = os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302")
 NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
 NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
 NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
 NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")
-NEKO_FORCE_TCP      = os.environ.get("NEKO_FORCE_TCP","0") == "1"
-FORCE_LITE_MODE     = os.environ.get("FORCE_LITE_MODE", "0").lower() in ("1", "true")
 
 ALLOWED_ACTIONS = {
     "CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY",
@@ -196,9 +194,10 @@ def frame_to_pil_image(frame:VideoStreamTrack) -> Image.Image:
     img = frame.to_image()
     logger.info("Frame decoded successfully.")
     logger.info(f"frame_to_pil_image: Got image {img.size}, mode {img.mode}")
-    if FRAME_SAVE_PATH:
+    if FRAME_SAVE_PATH is not None:
         try:
             img.save(FRAME_SAVE_PATH)
+
             logger.info(f"Saved frame to {FRAME_SAVE_PATH}")
         except Exception as e:
             logger.error(f"Error saving frame to {FRAME_SAVE_PATH}: {e}")
@@ -568,22 +567,6 @@ class NekoAgent:
 # Make sure the WebRTC setup flow is correct, webrtc is working in the webapp so it must be possible to establish connection
 # with the python agent we have here.
     async def _setup_media(self) -> None:
-        if FORCE_LITE_MODE:
-            logger.info("Lite/WebSocket mode is FORCED via environment variable.")
-            self.is_lite = True
-            # Start the listener *before* we request data from the server.
-            self.frame_source = LiteFrameSource(self.signaler)
-            await self.frame_source.start()
-
-            # Now, trigger the server to send us the stream info.
-            req = {"video": {"width": 1280, "height": 720, "frameRate": 30}}
-            if self.audio:
-                req["audio"] = {}
-            logger.info("Sending signal/request with payload: %r", req)
-            await self.signaler.send({"event": "signal/request", "payload": req})
-            await self.signaler.send({"event": "session/watch", "payload": {"id": "main"}})
-            # Exit this function immediately, letting LiteFrameSource handle all subsequent messages.
-            return
         """Sets up media streaming with the Neko server (WebRTC or lite)."""
         req = {
             "video": {"width": 1280, "height": 720, "frameRate": 30}
@@ -609,7 +592,9 @@ class NekoAgent:
 
         payload = offer_msg.get("payload", offer_msg)
 
-        self.is_lite = bool(os.environ.get("FORCE_LITE_MODE") or offer_msg.get("lite") or payload.get("lite"))
+        # TODO: Test this
+        # Fallback to grab frames over websockets if neko is in lite mode
+        self.is_lite = bool(offer_msg.get("lite") or payload.get("lite"))
         if self.is_lite:
             logger.info("Lite/WebSocket mode detected: using WebSocket image streaming.")
             self.frame_source = LiteFrameSource(self.signaler)
@@ -637,6 +622,7 @@ class NekoAgent:
         ice_servers.append(RTCIceServer(urls=[NEKO_STUN_URL]))
         if NEKO_TURN_URL:
             ice_servers.append(RTCIceServer(
+                #TODO: hack for current usecase make more generic
                 urls=[NEKO_TURN_URL + "?transport=tcp"],
                 username=NEKO_TURN_USER,
                 credential=NEKO_TURN_PASS,
@@ -657,21 +643,6 @@ class NekoAgent:
             RTCSessionDescription(sdp=payload["sdp"], type=payload.get("type","offer"))
         )
 
-        # Process buffered candidates now that remote description is set
-        # for cand_msg in buffered_candidates:
-        #     p = cand_msg["payload"]
-        #     cand = p.get("candidate")
-        #     if not cand: continue
-        #     ice = RTCIceCandidate(
-        #         candidate=cand,
-        #         sdpMid=p.get("sdpMid"),
-        #         sdpMLineIndex=p.get("sdpMLineIndex")
-        #     )
-        #     try:
-        #         await self.pc.addIceCandidate(ice)
-        #         logger.info("\u2705 Added buffered ICE candidate")
-        #     except Exception as e:
-        #         logger.warning("\u26a0\ufe0f addIceCandidate (buffered) failed: %s", e)
         # Process buffered candidates now that remote description is set
         for cand_msg in buffered_candidates:
             ice = self._parse_remote_candidate(cand_msg["payload"])
@@ -705,32 +676,7 @@ class NekoAgent:
                 msg = await self.signaler.recv(timeout=60)
             except asyncio.TimeoutError:
                 continue
-            # if msg.get("event") == "signal/candidate":
-            #     p = msg["payload"]
-            #     cand = p.get("candidate")
-            #     if not cand or not self.pc:
-            #         continue
 
-            #     parsed = None
-            #     if NEKO_FORCE_TCP:
-            #         raw = cand.split(":",1)[1] if cand.startswith("candidate:") else cand
-            #         parsed = candidate_from_sdp(raw)
-            #         if parsed.protocol.lower() != "tcp":
-            #             logger.debug("\u23f9\ufe0f Skipping non-TCP candidate: %s", parsed)
-            #             continue
-
-            #     ice = RTCIceCandidate(
-            #         candidate=cand,
-            #         sdpMid=p.get("sdpMid"),
-            #         sdpMLineIndex=p.get("sdpMLineIndex")
-            #     )
-            #     try:
-            #         await self.pc.addIceCandidate(ice)
-            #         logger.info("\u2705 Added ICE candidate (%s)", getattr(parsed, "protocol", "<unknown>"))
-            #     except Exception as e:
-            #         logger.warning("\u26a0\ufe0f addIceCandidate failed: %s", e)
-            # elif msg.get("event") == "signal/close":
-            #     break
             if msg.get("event") == "signal/candidate":
                 ice = self._parse_remote_candidate(msg["payload"]) # Use the helper
                 if ice and self.pc:
