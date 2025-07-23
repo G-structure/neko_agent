@@ -11,6 +11,7 @@ pkgs.mkShell {
   buildInputs = [
     pkgs.ffmpeg
     pkgs.pkgconf
+    pkgs.libvpx
 
     pkgs.python3Packages.pylibsrtp
     pkgs.python3Packages.aioice
