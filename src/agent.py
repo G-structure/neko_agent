@@ -806,6 +806,7 @@ class NekoAgent:
             if img is None:
                 await asyncio.sleep(0.01)
                 continue
+            #TODO: We need to account for resize in action position such as click
             img = resize_and_validate_image(img)
             act = await self._navigate_once(img, history, step)
             if not act or act.get("action") == "ANSWER":
