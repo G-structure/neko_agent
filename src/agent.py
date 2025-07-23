@@ -15,6 +15,7 @@ from aiortc import (
     RTCConfiguration, RTCIceServer, RTCPeerConnection,
     RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
 )
+from aiortc.sdp import candidate_from_sdp
 from PIL import Image
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from prometheus_client import start_http_server, Counter, Histogram
@@ -36,6 +37,7 @@ NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
 NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
 NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
 NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")  # 'all' or 'relay'
+NEKO_FORCE_TCP      = os.environ.get("NEKO_FORCE_TCP","0") == "1"
 
 ALLOWED_ACTIONS = {
     "CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY",
@@ -529,62 +531,61 @@ class NekoAgent:
 
         payload = offer_msg.get("payload", offer_msg)
 
-        # Neko historically used the key `ice` but newer versions use
-        # `iceservers`. Be tolerant and check multiple variants.
-        ice_servers_payload = (
+        ice_payload = (
             payload.get("ice")
             or payload.get("iceservers")
             or payload.get("iceServers")
             or payload.get("ice_servers")
             or []
         )
-        logger.info("ICE servers from signal payload: %r", ice_servers_payload)
+        logger.info("Server ICE list: %r", ice_payload)
 
-        ice_servers = []
-        for srv in ice_servers_payload:
-            ice_servers.append(RTCIceServer(
-                urls=srv[""],
+        ice_servers = [
+            RTCIceServer(
+                urls= srv.get("urls") or srv.get("url"),
                 username=srv.get("username"),
                 credential=srv.get("credential"),
+            )
+            for srv in ice_payload
+        ]
+
+        # — 2) Merge in env-driven fallbacks —————————————————————
+        ice_servers.append(RTCIceServer(urls=[NEKO_STUN_URL]))
+        if NEKO_TURN_URL:
+            ice_servers.append(RTCIceServer(
+                urls=[NEKO_TURN_URL + "?transport=tcp"],
+                username=NEKO_TURN_USER,
+                credential=NEKO_TURN_PASS,
             ))
-        # Add Google's public STUN as a fallback
-        ice_servers.append(RTCIceServer(urls=["stun:stun.l.google.com:19302"]))
 
-        config = RTCConfiguration(ice_servers)
-        self.pc = RTCPeerConnection(config)
-
-        # --- LOG ALL RTC/ICE STATE CHANGES ---
-        self.pc.on(
-            "iceconnectionstatechange",
-            lambda: logger.info(f"ICE connectionState → {self.pc.iceConnectionState}")
+        # — 3) Build config with chosen policy ——————————————————
+        config = RTCConfiguration(
+            iceServers=ice_servers,
+            iceTransportPolicy=NEKO_ICE_POLICY,
         )
-        self.pc.on(
+        pc = RTCPeerConnection(config)
+        self.pc = pc
+
+        # — 4) Instrument ICE state logging ————————————————————
+        for ev in (
             "icegatheringstatechange",
-            lambda: logger.info(f"ICE gatheringState → {self.pc.iceGatheringState}")
-        )
-        self.pc.on(
+            "iceconnectionstatechange",
             "connectionstatechange",
-            lambda: logger.info(f"PeerConnection state → {self.pc.connectionState}")
-        )
-        self.pc.on(
             "signalingstatechange",
-            lambda: logger.info(f"Signaling state → {self.pc.signalingState}")
-        )
-        self.pc.on(
-            "icecandidate",
-            lambda c: logger.info(f"LOCAL ICE CANDIDATE → {c}")
-        )
-        self.pc.on("icecandidate", lambda c: asyncio.create_task(self._on_ice(c)))
-        self.pc.on("track",       lambda t: asyncio.create_task(self._on_track(t)))
+        ):
+            pc.on(ev, lambda e=ev, p=pc: logger.info(f"{e} → {getattr(p, e.replace('statechange','State'))}"))
+        pc.on("icecandidate", lambda c: logger.debug("Local ICE → %s", c))
+        pc.on("icecandidate", lambda c: asyncio.create_task(self._on_ice(c)))
+        pc.on("track",       lambda t: asyncio.create_task(self._on_track(t)))
 
-        await self.pc.setRemoteDescription(
+        await pc.setRemoteDescription(
             RTCSessionDescription(sdp=payload["sdp"], type=payload.get("type","offer"))
         )
-        answer = await self.pc.createAnswer()
-        await self.pc.setLocalDescription(answer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
         await self.signaler.send({
             "event":"signal/answer",
-            "payload":{"sdp":self.pc.localDescription.sdp,"type":self.pc.localDescription.type}
+            "payload":{"sdp":pc.localDescription.sdp,"type":pc.localDescription.type}
         })
 
     # TODO: The WebRTC connection is still not fully reliable. We should monitor connectionState and ICE state closely here.
@@ -603,20 +604,29 @@ class NekoAgent:
             except asyncio.TimeoutError:
                 continue
             if msg.get("event") == "signal/candidate":
-                logger.info(f"RECEIVED remote ICE candidate → {msg['payload']}")
                 p = msg["payload"]
                 cand = p.get("candidate")
-                if cand and self.pc:
-                    ice = RTCIceCandidate(
-                        candidate=cand,
-                        sdpMid=p.get("sdpMid"),
-                        sdpMLineIndex=p.get("sdpMLineIndex")
-                    )
-                    try:
-                        await self.pc.addIceCandidate(ice)
-                        logger.info("Added remote ICE candidate")
-                    except Exception as e:
-                        logger.error("Failed to add ICE candidate: %s", e)
+                if not cand or not self.pc:
+                    continue
+
+                parsed = None
+                if NEKO_FORCE_TCP:
+                    raw = cand.split(":",1)[1] if cand.startswith("candidate:") else cand
+                    parsed = candidate_from_sdp(raw)
+                    if parsed.protocol.lower() != "tcp":
+                        logger.debug("\u23f9\ufe0f Skipping non-TCP candidate: %s", parsed)
+                        continue
+
+                ice = RTCIceCandidate(
+                    candidate=cand,
+                    sdpMid=p.get("sdpMid"),
+                    sdpMLineIndex=p.get("sdpMLineIndex")
+                )
+                try:
+                    await self.pc.addIceCandidate(ice)
+                    logger.info("\u2705 Added ICE candidate (%s)", getattr(parsed, "protocol", "<unknown>"))
+                except Exception as e:
+                    logger.warning("\u26a0\ufe0f addIceCandidate failed: %s", e)
             elif msg.get("event") == "signal/close":
                 break
 
