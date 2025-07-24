@@ -17,7 +17,7 @@ from aiortc import (
     RTCSessionDescription, RTCIceCandidate, VideoStreamTrack
 )
 from aiortc.sdp import candidate_from_sdp
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageDraw, ImageFont
 from abc import ABC, abstractmethod
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from prometheus_client import start_http_server, Counter, Histogram
@@ -37,6 +37,7 @@ DEFAULT_METRIC_PORT = int(os.environ.get("NEKO_METRICS_PORT", 9000))
 MAX_STEPS           = int(os.environ.get("NEKO_MAX_STEPS", 8))
 AUDIO_DEFAULT       = bool(int(os.environ.get("NEKO_AUDIO", "1")))
 FRAME_SAVE_PATH     = os.environ.get("FRAME_SAVE_PATH", None)
+CLICK_SAVE_PATH     = os.environ.get("CLICK_SAVE_PATH", None)
 OFFLOAD_FOLDER      = os.environ.get("OFFLOAD_FOLDER", "./offload")
 NEKO_STUN_URL       = os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302")
 NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
@@ -216,14 +217,26 @@ def pil_from_frame(frame):
     :param frame: The video frame object received from an `aiortc.VideoStreamTrack`.
     :returns: A validated Pillow `Image.Image` object in "RGB" mode.
     """
-    img = frame.to_image()
-    # Validate image dimensions
-    w, h = img.size
-    if w <= 0 or h <= 0:
-        raise ValueError(f"Invalid image dimensions: {w}x{h}")
+    try:
+        img = frame.to_image()
 
-    # Convert to RGB and return a copy to detach buffer
-    return img.convert("RGB").copy()
+        # Validate image dimensions
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            raise ValueError(f"Invalid image dimensions: {w}x{h}")
+
+        # Convert to RGB and return a copy to detach buffer
+        rgb_img = img.convert("RGB").copy()
+
+        # Validate the converted image
+        if rgb_img.size != (w, h):
+            raise ValueError(f"Image size changed during conversion: {img.size} -> {rgb_img.size}")
+
+        return rgb_img
+
+    except Exception as e:
+        logger.error(f"Failed to convert frame to PIL image: {e}")
+        raise ValueError(f"Frame conversion failed: {e}") from e
 
 def save_atomic(img, path):
     """Save image atomically to prevent truncated files.
@@ -273,6 +286,107 @@ def frame_to_pil_image(frame:VideoStreamTrack) -> Image.Image:
     except Exception as e:
         logger.error(f"Error decoding or validating frame: {e}")
         raise
+
+def draw_action_markers(img: Image.Image, action: Dict[str, Any], step: int) -> Image.Image:
+    """Draw red markers on the image to visualize the action.
+
+    :param img: The PIL Image to draw on
+    :param action: The action dictionary containing type, position, and value
+    :param step: The step number for labeling
+    :returns: A new PIL Image with action markers drawn
+    """
+    # Create a copy to avoid modifying the original
+    marked_img = img.copy()
+    draw = ImageDraw.Draw(marked_img)
+
+    action_type = action.get("action", "UNKNOWN")
+    position = action.get("position")
+    value = action.get("value", "")
+
+    # Red color for markers
+    marker_color = (255, 0, 0)  # RGB red
+    text_color = (255, 255, 255)  # White text
+
+    # Try to load a font, fall back to default if not available
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 16)
+    except:
+        try:
+            font = ImageFont.load_default()
+        except:
+            font = None
+
+    if position and isinstance(position, list) and len(position) == 2:
+        # Convert normalized coordinates to pixel coordinates
+        x = int(position[0] * img.width)
+        y = int(position[1] * img.height)
+
+        # Clamp coordinates to image bounds
+        x = max(0, min(x, img.width - 1))
+        y = max(0, min(y, img.height - 1))
+
+        # Draw different markers based on action type
+        if action_type in ("CLICK", "TAP", "SELECT", "HOVER"):
+            # Draw a circle with crosshairs
+            radius = 15
+            draw.ellipse([x-radius, y-radius, x+radius, y+radius],
+                        outline=marker_color, width=3)
+            draw.line([x-radius-5, y, x+radius+5, y], fill=marker_color, width=2)
+            draw.line([x, y-radius-5, x, y+radius+5], fill=marker_color, width=2)
+
+        elif action_type == "INPUT":
+            # Draw a rectangle for input fields
+            width, height = 100, 25
+            draw.rectangle([x-width//2, y-height//2, x+width//2, y+height//2],
+                          outline=marker_color, width=3)
+
+        elif action_type == "SWIPE" and isinstance(position[0], list) and len(position) == 2:
+            # Draw arrow for swipe
+            x1 = int(position[0][0] * img.width)
+            y1 = int(position[0][1] * img.height)
+            x2 = int(position[1][0] * img.width)
+            y2 = int(position[1][1] * img.height)
+
+            # Clamp coordinates
+            x1 = max(0, min(x1, img.width - 1))
+            y1 = max(0, min(y1, img.height - 1))
+            x2 = max(0, min(x2, img.width - 1))
+            y2 = max(0, min(y2, img.height - 1))
+
+            draw.line([x1, y1, x2, y2], fill=marker_color, width=4)
+            # Draw arrowhead
+            import math
+            angle = math.atan2(y2 - y1, x2 - x1)
+            arrow_length = 15
+            arrow_angle = math.pi / 6
+
+            arrow_x1 = x2 - arrow_length * math.cos(angle - arrow_angle)
+            arrow_y1 = y2 - arrow_length * math.sin(angle - arrow_angle)
+            arrow_x2 = x2 - arrow_length * math.cos(angle + arrow_angle)
+            arrow_y2 = y2 - arrow_length * math.sin(angle + arrow_angle)
+
+            draw.line([x2, y2, arrow_x1, arrow_y1], fill=marker_color, width=3)
+            draw.line([x2, y2, arrow_x2, arrow_y2], fill=marker_color, width=3)
+
+    # Add action label in top-left corner
+    label_text = f"Step {step}: {action_type}"
+    if value:
+        label_text += f" '{value}'"
+
+    # Draw text background for better visibility
+    if font:
+        bbox = draw.textbbox((0, 0), label_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    else:
+        text_width = len(label_text) * 8
+        text_height = 16
+
+    draw.rectangle([10, 10, 10 + text_width + 10, 10 + text_height + 10],
+                  fill=(0, 0, 0, 128))  # Semi-transparent black background
+    draw.text((15, 15), label_text, fill=text_color, font=font)
+
+    return marked_img
 
 class Signaler:
     """Manages WebSocket connections and signaling for the Neko agent.
@@ -441,13 +555,45 @@ class WebRTCFrameSource(FrameSource):
         :param track: The `aiortc.VideoStreamTrack` to receive frames from.
         :type track: VideoStreamTrack
         """
+        frame_count = 0
+        skip_initial_frames = 3  # Skip first few frames to avoid codec transitions
+
         try:
             while True:
-                frame = await track.recv()
-                img = frame_to_pil_image(frame)
-                async with self.lock:
-                    self.image = img
-                frames_received.inc()
+                try:
+                    frame = await track.recv()
+                    frame_count += 1
+
+                    # Skip initial frames as heuristic for codec stability
+                    if frame_count <= skip_initial_frames:
+                        logger.debug(f"Skipping initial frame {frame_count}/{skip_initial_frames}")
+                        continue
+
+                    # Validate frame before processing
+                    if not hasattr(frame, 'to_image') or not callable(getattr(frame, 'to_image')):
+                        logger.warning("Received invalid frame object, skipping")
+                        continue
+
+                    img = frame_to_pil_image(frame)
+
+                    # Additional validation: ensure reasonable image size
+                    w, h = img.size
+                    if w < 32 or h < 32 or w > 8192 or h > 8192:
+                        logger.warning(f"Frame size {w}x{h} outside reasonable bounds, skipping")
+                        continue
+
+                    async with self.lock:
+                        self.image = img
+                        if not self.first_frame.is_set():
+                            self.first_frame.set()
+
+                    frames_received.inc()
+
+                except Exception as frame_error:
+                    # Don't stop the reader for individual frame errors
+                    logger.warning(f"Failed to process frame {frame_count}: {frame_error}")
+                    continue
+
         except asyncio.CancelledError:
             # Expected on shutdown
             pass
@@ -861,6 +1007,24 @@ class NekoAgent:
         typ = act["action"] if act and act["action"] in ALLOWED_ACTIONS else "UNSUPPORTED"
         actions_executed.labels(action_type=typ).inc()
         logger.info(json.dumps({"phase":"navigate","run":self.run_id,"step":step,"action":act}))
+
+        # Save frame with action markers if CLICK_SAVE_PATH is configured
+        if act and CLICK_SAVE_PATH:
+            try:
+                marked_img = draw_action_markers(img, act, step)
+                # Generate timestamped filename
+                timestamp = asyncio.get_event_loop().time()
+                filename = f"action_step_{step:03d}_{timestamp:.3f}_{act.get('action', 'unknown')}.png"
+                save_path = os.path.join(CLICK_SAVE_PATH, filename) if os.path.isdir(CLICK_SAVE_PATH) else f"{CLICK_SAVE_PATH}_{filename}"
+
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+                save_atomic(marked_img, save_path)
+                logger.info(f"Saved action frame with markers to {save_path}")
+            except Exception as e:
+                logger.error(f"Failed to save action frame: {e}")
+
         if act:
             await self._execute_action(act, img.size)
         return act
