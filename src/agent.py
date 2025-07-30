@@ -42,7 +42,8 @@ OFFLOAD_FOLDER      = os.environ.get("OFFLOAD_FOLDER", "./offload")
 NEKO_STUN_URL       = os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302")
 NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
 NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
-NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
+NEKO_TURN_PASS = os.environ.get("NEKO_TURN_PASS")
+REFINEMENT_STEPS = int(os.environ.get("REFINEMENT_STEPS", "1"))
 NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")
 
 ALLOWED_ACTIONS = {
@@ -720,6 +721,7 @@ class NekoAgent:
     def __init__(self, model, processor, ws_url:str,
                  nav_task:str, nav_mode:str,
                  max_steps:int=MAX_STEPS,
+                 refinement_steps:int=REFINEMENT_STEPS,
                  metrics_port:int=DEFAULT_METRIC_PORT,
                  audio:bool=AUDIO_DEFAULT):
         """Initializes the NekoAgent with necessary components and configurations.
@@ -738,6 +740,9 @@ class NekoAgent:
         :param max_steps: The maximum number of navigation steps the agent
             will attempt before stopping. Defaults to `MAX_STEPS`.
         :type max_steps: int
+        :param refinement_steps: The number of refinement steps for coordinate
+            prediction. Defaults to `REFINEMENT_STEPS`.
+        :type refinement_steps: int
         :param metrics_port: The port for the Prometheus metrics server.
             Defaults to `DEFAULT_METRIC_PORT`.
         :type metrics_port: int
@@ -750,6 +755,7 @@ class NekoAgent:
         self.nav_task   = nav_task
         self.nav_mode   = nav_mode
         self.max_steps  = max_steps
+        self.refinement_steps = refinement_steps
         self.audio      = audio
         self.model      = model
         self.processor  = processor
@@ -961,14 +967,28 @@ class NekoAgent:
             step += 1
         logger.info(json.dumps({"phase":"complete","run":self.run_id,"steps":step}))
 
+    def _crop_image(self, image: Image.Image, click_xy: Tuple[float, float], crop_factor: float = 0.5) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+        """Crops the image around the click point."""
+        width, height = image.size
+        crop_width, crop_height = int(width * crop_factor), int(height * crop_factor)
+
+        center_x, center_y = int(click_xy[0] * width), int(click_xy[1] * height)
+        left = max(center_x - crop_width // 2, 0)
+        upper = max(center_y - crop_height // 2, 0)
+        right = min(center_x + crop_width // 2, width)
+        lower = min(center_y + crop_height // 2, height)
+
+        crop_box = (left, upper, right, lower)
+        cropped_image = image.crop(crop_box)
+        return cropped_image, crop_box
+
     async def _navigate_once(self, img:Image.Image, history:List[Dict[str,Any]], step:int) -> Optional[Dict[str,Any]]:
         """Performs a single navigation step, involving AI inference and action.
-
         This internal method constructs the prompt for the AI model using
         the current screen image, task, and action history. It then runs
         the model inference, parses the raw output into a structured action,
-        and executes the action if valid.
-
+        and executes the action if valid. It includes refinement steps for
+        CLICK actions.
         :param img: The current screen observation as a PIL Image.
         :type img: Image.Image
         :param history: A list of previously executed actions.
@@ -979,54 +999,85 @@ class NekoAgent:
             inference failed.
         :rtype: Optional[Dict[str,Any]]
         """
-        content: List[Dict[str, Any]] = [
-            {"type":"text","text":self.sys_prompt},
-            {"type":"text","text":f"Task: {self.nav_task}"},
-        ]
-        if history:
-            content.append({"type":"text","text":f"Action history: {json.dumps(history)}"})
-        content.append({"type":"image","image":img,
-                        "size":{"shortest_edge":SIZE_SHORTEST_EDGE,"longest_edge":SIZE_LONGEST_EDGE}})
-        msgs = [{"role":"user","content":content}]
-        text   = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-        inputs = self.processor(text=[text], images=[img], videos=None,
-                                padding=True, return_tensors="pt").to(self.model.device)
-        future = self.loop.run_in_executor(None, lambda: self.model.generate(**inputs, max_new_tokens=128))
-        try:
-            with inference_latency.time():
-                gen = await asyncio.wait_for(future, timeout=30.0)
-        except asyncio.TimeoutError:
-            future.cancel()
-            logger.error(json.dumps({"phase":"inference","run":self.run_id,"step":step,"msg":"timeout"}))
-            parse_errors.inc()
-            return None
-        out_ids     = [o[len(i):] for o,i in zip(gen, inputs.input_ids)]
-        raw_output  = self.processor.batch_decode(out_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+        original_img = img
+        current_img = original_img
+        full_width, full_height = original_img.size
+        crop_box = (0, 0, full_width, full_height)
+
+        raw_output = ""
+        act = None
+
+        for i in range(self.refinement_steps):
+            content: List[Dict[str, Any]] = [
+                {"type":"text","text":self.sys_prompt},
+                {"type":"text","text":f"Task: {self.nav_task}"},
+            ]
+            if history:
+                content.append({"type":"text","text":f"Action history: {json.dumps(history)}"})
+            content.append({"type":"image","image":current_img,
+                            "size":{"shortest_edge":SIZE_SHORTEST_EDGE,"longest_edge":SIZE_LONGEST_EDGE}})
+            msgs = [{"role":"user","content":content}]
+            text   = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(text=[text], images=[current_img], videos=None,
+                                    padding=True, return_tensors="pt").to(self.model.device)
+
+            future = self.loop.run_in_executor(None, lambda: self.model.generate(**inputs, max_new_tokens=128))
+            try:
+                with inference_latency.time():
+                    gen = await asyncio.wait_for(future, timeout=30.0)
+            except asyncio.TimeoutError:
+                future.cancel()
+                logger.error(json.dumps({"phase":"inference","run":self.run_id,"step":step,"msg":"timeout"}))
+                parse_errors.inc()
+                return None
+
+            out_ids     = [o[len(i):] for o,i in zip(gen, inputs.input_ids)]
+            raw_output  = self.processor.batch_decode(out_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+            act = safe_parse_action(raw_output, nav_mode=self.nav_mode)
+
+            if not (act and act.get("action") == "CLICK" and act.get("x") is not None and act.get("y") is not None):
+                break
+
+            click_x, click_y = act["x"], act["y"]
+
+            crop_left, crop_top, _, _ = crop_box
+            crop_width = crop_box[2] - crop_box[0]
+            crop_height = crop_box[3] - crop_box[1]
+
+            abs_x = crop_left + click_x * crop_width
+            abs_y = crop_top + click_y * crop_height
+
+            final_x = abs_x / full_width
+            final_y = abs_y / full_height
+
+            act["x"], act["y"] = final_x, final_y
+
+            if i < self.refinement_steps - 1:
+                current_img, crop_box = self._crop_image(original_img, (final_x, final_y))
+                logger.info(json.dumps({
+                    "phase":"refine", "run":self.run_id, "step":step, "refinement": i,
+                    "msg": f"Refining coordinates. New crop box: {crop_box}"
+                }))
+
         logger.info(json.dumps({"phase":"navigate","run":self.run_id,"step":step,"raw":raw_output}))
-        act = safe_parse_action(raw_output, nav_mode=self.nav_mode)
         typ = act["action"] if act and act["action"] in ALLOWED_ACTIONS else "UNSUPPORTED"
         actions_executed.labels(action_type=typ).inc()
         logger.info(json.dumps({"phase":"navigate","run":self.run_id,"step":step,"action":act}))
 
-        # Save frame with action markers if CLICK_SAVE_PATH is configured
         if act and CLICK_SAVE_PATH:
             try:
-                marked_img = draw_action_markers(img, act, step)
-                # Generate timestamped filename
+                marked_img = draw_action_markers(original_img, act, step)
                 timestamp = asyncio.get_event_loop().time()
                 filename = f"action_step_{step:03d}_{timestamp:.3f}_{act.get('action', 'unknown')}.png"
                 save_path = os.path.join(CLICK_SAVE_PATH, filename) if os.path.isdir(CLICK_SAVE_PATH) else f"{CLICK_SAVE_PATH}_{filename}"
-
-                # Ensure directory exists
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
                 save_atomic(marked_img, save_path)
                 logger.info(f"Saved action frame with markers to {save_path}")
             except Exception as e:
                 logger.error(f"Failed to save action frame: {e}")
 
         if act:
-            await self._execute_action(act, img.size)
+            await self._execute_action(act, original_img.size)
         return act
 
     async def _execute_action(self, action:Dict[str,Any], size:Tuple[int,int]) -> None:
@@ -1087,7 +1138,7 @@ class NekoAgent:
             logger.info("[ANSWER] %r", val)
         else:
             logger.warning("Unsupported action: %r", action)
-    
+
     #TODO: fix chat consumer
     async def _consume_chat(self):
         """Consume incoming chat messages and update the task."""
