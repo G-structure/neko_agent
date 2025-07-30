@@ -610,7 +610,7 @@ class WebRTCFrameSource(FrameSource):
         :rtype: Optional[Image.Image]
         """
         async with self.lock:
-            return self.image
+            return self.image.copy() if self.image else None
 
 
 class LiteFrameSource(FrameSource):
@@ -675,7 +675,7 @@ class LiteFrameSource(FrameSource):
 
     async def get(self) -> Optional[Image.Image]:
         async with self._lock:
-            return self.image
+            return self.image.copy() if self.image else None
 
 class NekoAgent:
     """Manages the Neko WebRTC agent's lifecycle, including signaling, WebRTC

@@ -10,3 +10,5 @@ set these envs in the `shell.nix`
 nix-shell
 OFFLOAD_FOLDER=""  NEKO_LOGLEVEL=DEBUG python src/agent.py --username --password --neko-url https://
 ```
+
+Run neko in (1280, 800)

@@ -31,10 +31,12 @@ pkgs.mkShell {
 
   shellHook = ''
     export NEKO_LOGLEVEL=DEBUG
-    export NEKO_USER=
-    export NEKO_PASS=
-    export NEKO_URL="https://"
-    # export FRAME_SAVE_PATH =
+    export NEKO_USER=agent
+    export NEKO_PASS=admin
+    export NEKO_URL=""
+    # export OFFLOAD_FOLDER=""
+    # export FRAME_SAVE_PATH=""
+    # export CLICK_SAVE_PATH=""
     # export NEKO_ICESERVERS='[{"urls":["stun:stun.l.google.com:19302"]}]'
     # export PYTHONPATH=$PWD/src
   '';
