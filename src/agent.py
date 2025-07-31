@@ -42,8 +42,8 @@ OFFLOAD_FOLDER      = os.environ.get("OFFLOAD_FOLDER", "./offload")
 NEKO_STUN_URL       = os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302")
 NEKO_TURN_URL       = os.environ.get("NEKO_TURN_URL")
 NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
-NEKO_TURN_PASS = os.environ.get("NEKO_TURN_PASS")
-REFINEMENT_STEPS = int(os.environ.get("REFINEMENT_STEPS", "1"))
+NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
+REFINEMENT_STEPS    = int(os.environ.get("REFINEMENT_STEPS", "1"))
 NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")
 
 ALLOWED_ACTIONS = {

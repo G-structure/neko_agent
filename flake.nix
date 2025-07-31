@@ -7,12 +7,11 @@
 
   outputs = { self, nixpkgs }:
     let
+      # Targeted systems for cross-platform support
       supportedSystems = [ "x86_64-linux" "aarch64-darwin" ];
 
-      forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
-    in
-    {
-      devShells = forAllSystems (system:
+      # Generate a devShell for each system
+      forAllSystems = nixpkgs.lib.genAttrs supportedSystems (system:
         let
           pkgs = import nixpkgs {
             inherit system;
@@ -26,14 +25,17 @@
         {
           default = pkgs.mkShell {
             buildInputs = [
+              # Media and system tools
               pkgs.ffmpeg
               pkgs.pkgconf
               pkgs.libvpx
 
+              # Python SRTP/ICE/RTCP libraries
               pkgs.python3Packages.pylibsrtp
               pkgs.python3Packages.aioice
               pkgs.python3Packages.aiortc
 
+              # Python AI and utility packages
               (pkgs.python3.withPackages (ps: with ps; [
                 transformers
                 torch
@@ -46,19 +48,22 @@
               ]))
             ];
 
+            # Load secret env vars at runtime from an untracked .env
             shellHook = ''
-              export NEKO_LOGLEVEL=DEBUG
-              export NEKO_USER=agent
-              export NEKO_PASS=admin
-              export NEKO_URL="https://1debc96c651ca3992733d6b67631d0ec749b557f-52000.dstack-prod5.phala.network"
-              export OFFLOAD_FOLDER="/Users/luc/.cache/huggingface"
-              export FRAME_SAVE_PATH="/Users/luc/projects/neko_agent/tmp/frame.png"
-              export CLICK_SAVE_PATH="/Users/luc/projects/neko_agent/tmp/actions"
-              # export NEKO_ICESERVERS='[{"urls":["stun:stun.l.google.com:19302"]}]'
-              # export PYTHONPATH=$PWD/src
+              if [ -f .env ]; then
+                # export all variables defined below
+                set -a
+                # source the file from the project directory
+                source .env
+                # stop auto-export
+                set +a
+              fi
             '';
           };
         }
       );
+    in
+    {
+      devShells = forAllSystems;
     };
 }
