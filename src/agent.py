@@ -116,6 +116,8 @@ if NEKO_LOGFILE:
         logger.error(f"Failed to set up file logging to {NEKO_LOGFILE}: {e}")
 
 #TODO Write pytests for function safe_parse_action
+#TODO We should really get rid of AST, this will require constranted sampling of the json
+#     from the llm
 def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[str,Any]]:
     """Parses a JSON string into an action dictionary and validates it.
 
