@@ -6,7 +6,7 @@ Env vars: NEKO_URL, NEKO_USER, NEKO_PASS, NEKO_WS, etc.
 """
 import os, sys, asyncio, json, signal, logging, random, uuid, contextlib
 from typing import Any, Dict, List, Optional, Tuple
-
+import time
 import torch
 import websockets
 import requests
@@ -22,8 +22,6 @@ from abc import ABC, abstractmethod
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 from prometheus_client import start_http_server, Counter, Histogram
 import ast
-
-logging.getLogger("aiortc").setLevel(logging.DEBUG)
 
 # Configure PIL to fail fast on truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = False
@@ -45,42 +43,12 @@ NEKO_TURN_USER      = os.environ.get("NEKO_TURN_USER")
 NEKO_TURN_PASS      = os.environ.get("NEKO_TURN_PASS")
 REFINEMENT_STEPS    = int(os.environ.get("REFINEMENT_STEPS", "1"))
 NEKO_ICE_POLICY     = os.environ.get("NEKO_ICE_POLICY","all")
-
+NEKO_LOGFILE        = os.environ.get("NEKO_LOGFILE", None)
+NEKO_LOGLEVEL       = os.environ.get("NEKO_LOGLEVEL","INFO")
 ALLOWED_ACTIONS = {
     "CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY",
     "SWIPE","TAP"
 }
-frames_received    = Counter("neko_frames_received_total",    "Total video frames received")
-actions_executed   = Counter("neko_actions_executed_total",   "Actions executed by type", ["action_type"])
-parse_errors       = Counter("neko_parse_errors_total",       "Action parse errors")
-navigation_steps   = Counter("neko_navigation_steps_total",   "Navigation step count")
-inference_latency  = Histogram("neko_inference_latency_seconds","Inference latency")
-reconnects         = Counter("neko_reconnects_total",         "WS reconnect attempts")
-resize_duration    = Histogram("neko_resize_duration_seconds","Resize time")
-
-logger = logging.getLogger("neko_agent")
-logging.basicConfig(
-    level=os.environ.get("NEKO_LOGLEVEL","INFO"),
-    format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
-)
-
-# Add a file handler if NEKO_LOGFILE environment variable is set
-neko_logfile = os.environ.get("NEKO_LOGFILE")
-if neko_logfile:
-    try:
-        # Use the same formatter for the file handler for consistency
-        log_format = '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
-        formatter = logging.Formatter(log_format)
-
-        file_handler = logging.FileHandler(neko_logfile)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        # Log this info message to both console and the new file
-        logger.info(f"Neko agent logging to file: {neko_logfile}")
-    except Exception as e:
-        logger.error(f"Failed to set up file logging to {neko_logfile}: {e}")
-
-
 ACTION_SPACES = {
     "web":   ["CLICK","INPUT","SELECT","HOVER","ANSWER","ENTER","SCROLL","SELECT_TEXT","COPY"],
     "phone": ["INPUT","SWIPE","TAP","ANSWER","ENTER"],
@@ -117,6 +85,37 @@ _NAV_SYSTEM = (
     "Do NOT output extra keys or commentary."
 )
 
+frames_received    = Counter("neko_frames_received_total",    "Total video frames received")
+actions_executed   = Counter("neko_actions_executed_total",   "Actions executed by type", ["action_type"])
+parse_errors       = Counter("neko_parse_errors_total",       "Action parse errors")
+navigation_steps   = Counter("neko_navigation_steps_total",   "Navigation step count")
+inference_latency  = Histogram("neko_inference_latency_seconds","Inference latency")
+reconnects         = Counter("neko_reconnects_total",         "WS reconnect attempts")
+resize_duration    = Histogram("neko_resize_duration_seconds","Resize time")
+
+logging.getLogger("aiortc").setLevel(logging.DEBUG)
+logger = logging.getLogger("neko_agent")
+logging.basicConfig(
+    level=NEKO_LOGLEVEL,
+    format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
+)
+
+# Add a file handler if NEKO_LOGFILE environment variable is set
+if NEKO_LOGFILE:
+    try:
+        # Use the same formatter for the file handler for consistency
+        log_format = '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}'
+        formatter = logging.Formatter(log_format)
+
+        file_handler = logging.FileHandler(NEKO_LOGFILE)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        # Log this info message to both console and the new file
+        logger.info(f"Neko agent logging to file: {NEKO_LOGFILE}")
+    except Exception as e:
+        logger.error(f"Failed to set up file logging to {NEKO_LOGFILE}: {e}")
+
+#TODO Write pytests for function safe_parse_action
 def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[str,Any]]:
     """Parses a JSON string into an action dictionary and validates it.
 
@@ -131,8 +130,8 @@ def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[st
     :param nav_mode: The navigation mode ("web" or "phone") to validate
         the action type against its allowed actions. Defaults to "web".
     :type nav_mode: str
-    :returns: A validated action dictionary if parsing and validation succeed,
-        otherwise `None`.
+    :returns: A validated action dictionary if parsing and validation
+        succeed, otherwise `None`.
     :rtype: Optional[Dict[str,Any]]
     """
     try:
@@ -148,6 +147,7 @@ def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[st
             return None
 
     try:
+        #TODO get rid of this hidden assert magic
         assert isinstance(act, dict)
         typ = act.get("action")
         if typ not in ACTION_SPACES[nav_mode]:
@@ -162,6 +162,7 @@ def safe_parse_action(output_text: str, nav_mode: str="web") -> Optional[Dict[st
         parse_errors.inc()
         return None
 
+#TODO write pytests for function clamp_xy
 def clamp_xy(x:int,y:int,size:Tuple[int,int]) -> Tuple[int,int]:
     """Clamps X and Y coordinates to be within the bounds of a given size.
 
@@ -182,6 +183,7 @@ def clamp_xy(x:int,y:int,size:Tuple[int,int]) -> Tuple[int,int]:
     w,h = size
     return max(0,min(x,w-1)), max(0,min(y,h-1))
 
+#TODO write pytests for function resize_and_validate_image
 def resize_and_validate_image(image:Image.Image) -> Image.Image:
     """Resizes an image if its longest edge exceeds a predefined maximum size.
 
@@ -197,7 +199,6 @@ def resize_and_validate_image(image:Image.Image) -> Image.Image:
         original image.
     :rtype: Image.Image
     """
-    import time
     ow,oh = image.size
     me = max(ow,oh)
     if me > SIZE_LONGEST_EDGE:

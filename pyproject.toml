@@ -34,3 +34,103 @@ py-modules = ["agent"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# [tool.ruff]
+# line-length = 88
+# target-version = "py313"
+# select = [
+#     "E", # all pycodestyle errors, including E402 (“module level import not at top of file”)
+#     "F", # pyflakes
+#     "W", # pycodestyle warnings
+#     "I", # isort
+#     "B", # Bugbear
+#     "D", # pydocstyle
+# ]
+# # make sure E402 stays enabled as an error
+# extend-select = ["E402"]
+
+# ignore = [
+#     "D203", # blank line before class docstring
+#     "D213", # multi‐line docstring style
+# ]
+
+# [tool.ruff.format]
+# # keep using Ruff’s built-in formatter
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src"]                 # ensure imports from src/ are treated as first-party
+required-version = ">=0.12.7" # keep results stable across machines
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint]
+# Core correctness + imports + docs, then targeted quality/security
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "D",
+    "UP",
+    "SIM",
+    "C4",
+    "PIE",
+    "N",
+    "ANN",
+    "ARG",
+    "S",
+    "DTZ",
+    "PTH",
+    "G",
+    "T20",
+    "TRY",
+    "BLE",
+    "FBT",
+    "C90",
+    "RUF",
+    "RET",
+]
+# Keep a Black-compatible docstring layout and avoid formatter conflicts
+ignore = [
+    "D203",
+    "D213",   # docstring layout that conflicts with common formatting
+    "COM812",
+    "ISC001", # formatter overlaps
+]
+fixable = ["ALL"]
+unfixable = []
+# If you want early access rules, flip this on and opt in per-rule:
+# preview = true
+# explicit-preview-rules = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "S101", "ANN", "ARG", "PLR2004"] # pragmatic test ergonomics
+"**/__init__.py" = ["F401"]                         # allow re-export patterns
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 72 # PEP 8 doc/comment width
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent"] # ensure correct import grouping for your module
+
+[tool.ruff.per-file-target-version]
+"scripts/*.py" = "py312" # scripts can use slightly older syntax if needed
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents" # no parent hops; siblings OK
+banned-module-level-imports = [
+    "torch",
+    "torchvision",
+    "av",
+] # import heavies lazily
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"cgi".msg = "The cgi module is deprecated; see PEP 594."

@@ -2,3 +2,4 @@
 .ropeproject
 tmp/*
 .env
+src/*.egg-info
