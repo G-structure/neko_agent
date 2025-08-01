@@ -793,6 +793,7 @@ class NekoAgent:
             try:
                 async with await self.signaler.connect_with_backoff() as ws:
                     self.signaler.ws = ws
+                    await self.signaler.send({"event":"control/request_host"})
                     await self._setup_media()
                     if not self.is_lite:
                         self.ice_task = asyncio.create_task(self._consume_remote_ice())
@@ -965,6 +966,7 @@ class NekoAgent:
                 break
             history.append(act)
             step += 1
+            await asyncio.sleep(0.01)
         logger.info(json.dumps({"phase":"complete","run":self.run_id,"steps":step}))
 
     def _crop_image(self, image: Image.Image, click_xy: Tuple[float, float], crop_factor: float = 0.5) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
@@ -1110,8 +1112,9 @@ class NekoAgent:
             await self.signaler.send({"event":"control/click","payload":{"button":"left","state":"down"}})
             await self.signaler.send({"event":"control/click","payload":{"button":"left","state":"up"}})
             for ch in str(val):
-                await self.signaler.send({"event":"control/key","payload":{"key":ch,"code":ord(ch),"state":"down"}})
-                await self.signaler.send({"event":"control/key","payload":{"key":ch,"code":ord(ch),"state":"up"}})
+                code = ord(ch.upper())
+                await self.signaler.send({"event":"control/key","payload":{"key":ch,"code":code,"state":"down"}})
+                await self.signaler.send({"event":"control/key","payload":{"key":ch,"code":code,"state":"up"}})
         elif typ=="ENTER":
             for s in ({"key":"Enter","code":13,"state":"down"},{"key":"Enter","code":13,"state":"up"}):
                 await self.signaler.send({"event":"control/key","payload":s})
