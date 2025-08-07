@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  neko-chrome:
+    image: ghcr.io/m1k1o/neko/chromium:latest
+    container_name: neko-chrome
+    restart: unless-stopped
+    network_mode: host
+    shm_size: 2gb
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      NEKO_DESKTOP_SCREEN: 1920x1080@30
+      NEKO_MEMBER_PROVIDER: multiuser
+      NEKO_MEMBER_MULTIUSER_USER_PASSWORD: ${NEKO_USER:-neko}
+      NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: ${NEKO_PASS:-admin}
+      NEKO_WEBRTC_UDPMUX: 0
+      NEKO_WEBRTC_TCPMUX: 56000
+      NEKO_WEBRTC_ICELITE: "false"
+      NEKO_WEBRTC_ICESERVERS_FRONTEND: '[{"urls":["stun:stun.l.google.com:19302?transport=tcp","stun:stun1.l.google.com:19302?transport=tcp"]}]'
+      NEKO_WEBRTC_ICESERVERS_BACKEND: '[{"urls":["stun:stun.l.google.com:19302?transport=tcp"]}]'
+      NEKO_WEBRTC_TCP_ONLY: "true"
+      NEKO_SERVER_PROXY: "false"
+      NEKO_DEBUG: 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
