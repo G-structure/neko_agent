@@ -3,3 +3,16 @@
 tmp/*
 .env
 src/*.egg-info
+.npm-global
+src/__pycache__
+deps/*
+data/*
+voices/*
+result
+docs/book/*
+tmp
+docs/book
+voices
+deps
+.venv
+.claude

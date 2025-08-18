@@ -4,6 +4,13 @@
 shell:
     nix develop
 
+# Start the nix GPU development shell (Ubuntu/NVIDIA)
+gpu:
+    NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- nix develop .#gpu
+
+pydebug:
+    NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- nix develop .#pydebug
+
 # Launch the agent with a default task
 agent:
     NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko1.log" python src/agent.py --task "search for pics of cats"
@@ -35,6 +42,18 @@ manual:
 #    #!/usr/bin/env bash
 #    cd "{{justfile_directory()}}"
 #    nix develop --command bash -c 'NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko1.log" python src/manual.py'
+
+# Launch the agent via uv with .env
+uv-agent:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    if [ -f .env ]; then
+      set -a
+      source .env
+      set +a
+    fi
+    uv run src/agent.py
 
 # Force kill the manual control script
 kill-manual:
@@ -85,3 +104,75 @@ clean:
     rm -f tmp/frame.png
     rm -f tmp/neko1.log
     rm -f tmp/*.tmp
+
+# === NEW: Optimized development shells ===
+
+# CPU-optimized shell (znver2 flags)
+cpu-opt:
+    nix develop .#cpu-opt
+
+# GPU-optimized shell (znver2 + CUDA sm_86)
+gpu-opt:
+    NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- nix develop .#gpu-opt
+
+# === NEW: Docker image management ===
+
+# Build both Docker images
+images:
+    nix build .#neko-agent-docker-generic .#neko-agent-docker-opt
+
+# Build generic Docker image (portable)
+docker-build-generic:
+    nix build .#neko-agent-docker-generic
+
+# Build optimized Docker image (znver2 + sm_86)
+docker-build-optimized:
+    nix build .#neko-agent-docker-opt
+
+# Run generic Docker image (requires NVIDIA Container Toolkit)
+docker-run-generic:
+    #!/usr/bin/env bash
+    echo "Loading generic CUDA image..."
+    docker load < result
+    echo "Running neko-agent:cuda12.8-generic with GPU support..."
+    docker run --rm --gpus all \
+        -e NVIDIA_VISIBLE_DEVICES=all \
+        -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+        -e NEKO_WS="${NEKO_WS:-}" \
+        -e NEKO_LOGLEVEL="${NEKO_LOGLEVEL:-INFO}" \
+        neko-agent:cuda12.8-generic
+
+# Run optimized Docker image (requires NVIDIA Container Toolkit)  
+docker-run-optimized:
+    #!/usr/bin/env bash
+    echo "Loading optimized CUDA image..."
+    docker load < result
+    echo "Running neko-agent:cuda12.8-sm86-v3 with GPU support..."
+    docker run --rm --gpus all \
+        -e NVIDIA_VISIBLE_DEVICES=all \
+        -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+        -e NEKO_WS="${NEKO_WS:-}" \
+        -e NEKO_LOGLEVEL="${NEKO_LOGLEVEL:-INFO}" \
+        neko-agent:cuda12.8-sm86-v3
+
+# Build all images using Nix app
+build-images:
+    nix run .#build-images
+
+# === Finetuning ===
+
+# Train on captured MDS episodes (uses .env)
+train:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    if [ -f .env ]; then set -a; source .env; set +a; fi
+    python src/train.py
+
+# Train with uv runner (loads .env)
+uv-train:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    if [ -f .env ]; then set -a; source .env; set +a; fi
+    uv run src/train.py

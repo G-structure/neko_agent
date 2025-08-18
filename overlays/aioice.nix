@@ -2,10 +2,10 @@ self: super: {
   python3Packages = super.python3Packages // {
     aioice = super.python3Packages.buildPythonPackage rec {
       pname    = "aioice";
-      version  = "0.8.0";
+      version  = "0.10.1";
       format   = "setuptools";
       src      = super.fetchFromGitHub {
-        owner = "aiortc"; repo = "aioice"; rev = "v${version}";
+        owner = "aiortc"; repo = "aioice"; rev = "${version}";
         sha256 = "sha256-KFYPzGPm+d1QrFAW9OhTDxroV/MnFusmfy5qcYCfDiM=";
       };
       propagatedBuildInputs = with super.python3Packages; [ dnspython ifaddr ];

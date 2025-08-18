@@ -1,4 +1,305 @@
 # Neko
+## Repository Cheat Sheet (Current Codebase)
+- Project Structure:
+  - `server/`: Go backend (`cmd/`, `internal/`, `pkg/`, optional `plugins/`). Build via `server/build` → `server/bin/neko`.
+  - `client/`: Vue 2 + TypeScript SPA (`src/`, `public/`), built to `client/dist`.
+  - `apps/`: Docker app images (e.g., `firefox/`, `chromium/`, `kde/`, `vlc/`).
+  - `runtime/`: Base image and Xorg/driver configs; basis for final images.
+  - `utils/`: Tooling; Dockerfile generator at `utils/docker/main.go`.
+  - `webpage/`: Docusaurus docs site.
+  - Root: `build` (image builder), `docker-compose.yaml` (local run), `config.yml` (sample config).
+- Dev Commands:
+  - Client dev: `cd client && npm ci && npm run serve` (hot-reload dev server).
+  - Client build: `cd client && npm run build` → `client/dist`.
+  - Client lint: `cd client && npm run lint`.
+  - Server build: `cd server && ./build` (use `./build core` to skip plugins) → `server/bin/neko`.
+  - Docker images: base `./build`, app `./build -a firefox`, flavor `./build -f nvidia -a chromium`.
+  - Local run: `docker compose up -d` (serves `ghcr.io/m1k1o/neko/firefox:latest` on `:8080`).
+- Coding Style:
+  - Indent 2 spaces (LF). Client: Prettier single quotes, no semicolons, trailing commas. Go: gofmt/go vet; package names short/lowercase; files snake_case.
+- Architecture & Entry Points:
+  - SPA served as static assets from container; talks HTTP/WS on `:8080`.
+  - `server/cmd/neko/main.go` → `cmd.Execute()`; `server/cmd/root.go` config/logging init; `server/cmd/serve.go` wires managers in order: session → member → desktop → capture → webrtc → websocket → api → http.
+  - HTTP: `server/internal/http/manager.go` registers `/api`, `/api/ws`, `/health`, `/metrics`, static files, optional pprof.
+  - REST router: `server/internal/api/router.go`. WebSocket: `server/internal/websocket/manager.go`. WebRTC: `server/internal/webrtc/manager.go`. Session/auth: `server/internal/session`, `server/internal/member/*`. Capture/Xorg: `server/internal/capture`, `server/internal/desktop`.
+- API Surface (summary; see `server/openapi.yaml`):
+  - Auth: `POST /api/login`, `POST /api/logout`, `GET /api/whoami`, `POST /api/profile`.
+  - Sessions: `GET /api/sessions`, `GET/DELETE /api/sessions/{id}`, `POST /api/sessions/{id}/disconnect`.
+  - Room: `GET/POST /api/room/settings`, broadcast `GET /api/room/broadcast`, `POST /api/room/broadcast/start|stop`.
+  - Clipboard: `GET/POST /api/room/clipboard`, image `GET /api/room/clipboard/image.png`.
+  - Keyboard: `GET/POST /api/room/keyboard/map`, `GET/POST /api/room/keyboard/modifiers`.
+  - Control: `GET /api/room/control`, `POST /api/room/control/{request|release|take|give/{sessionId}|reset}`.
+  - Screen: `GET/POST /api/room/screen`, `GET /api/room/screen/configurations`, `GET /api/room/screen/{cast.jpg|shot.jpg}`.
+  - Upload: `POST /api/room/upload/{drop|dialog}`, `DELETE /api/room/upload/dialog`.
+  - Utility: `POST /api/batch`, `GET /health`, `GET /metrics`.
+- WebSocket:
+  - Connect `ws(s)://<host>/api/ws` with cookie, `Authorization: Bearer <token>`, or `?token=<token>`.
+  - Envelope `{ "event": "<string>", "payload": <JSON> }` with events defined under `server/pkg/types/event/events.go` (e.g., `system/init`, `signal/request`, `control/move`, `clipboard/set`, `keyboard/map`, `broadcast/status`, `file_chooser_dialog/opened|closed`).
+- Configuration Model:
+  - Defaults in `config.yml`; override via `NEKO_*` envs; legacy v2 envs supported behind `NEKO_LEGACY=1` and have v3 equivalents (see `server/internal/config/*`).
+
+## Complete REST API (v3)
+Authentication
+- Methods: Cookie (`NEKO_SESSION`), Bearer token (`Authorization: Bearer <token>`), or query token (`?token=<token>`).
+- Default security applies to all endpoints unless explicitly noted; `/health`, `/metrics`, and `/api/login` do not require auth.
+
+General
+- GET `/health`: Liveness probe. 200 text/plain.
+- GET `/metrics`: Prometheus metrics. 200 text/plain.
+- POST `/api/batch`: Execute multiple API requests in one call.
+  - Request: `[{ path: string, method: 'GET'|'POST'|'DELETE', body?: any }]`.
+  - Response: `[{ path, method, status: number, body?: any }]`.
+- GET `/api/stats`: Server/session statistics.
+  - Response: `{ has_host, host_id, server_started_at, total_users, last_user_left_at, total_admins, last_admin_left_at }`.
+
+Current Session
+- POST `/api/login`: Authenticate and start a session. No auth required.
+  - Request: `{ username, password }`.
+  - Response: `SessionLoginResponse` = `SessionData` plus optional `{ token }` if cookies are disabled.
+- POST `/api/logout`: Terminate current session. 200.
+- GET `/api/whoami`: Retrieve current session info.
+  - Response: `SessionData`.
+- POST `/api/profile`: Update current session’s runtime profile (no member sync).
+  - Request: `MemberProfile`. 204.
+
+Sessions
+- GET `/api/sessions`: List active sessions.
+  - Response: `SessionData[]`.
+- GET `/api/sessions/{sessionId}`: Get a session by id.
+  - Response: `SessionData`. 404 if not found.
+- DELETE `/api/sessions/{sessionId}`: Remove a session. 204.
+- POST `/api/sessions/{sessionId}/disconnect`: Force disconnect a session. 204.
+
+Room Settings
+- GET `/api/room/settings`: Get room settings.
+  - Response: `Settings`.
+- POST `/api/room/settings`: Update room settings. 204.
+  - Request: `Settings`.
+
+Room Broadcast
+- GET `/api/room/broadcast`: Get broadcast status.
+  - Response: `{ url?: string, is_active: boolean }`.
+- POST `/api/room/broadcast/start`: Start RTMP broadcast.
+  - Request: `{ url: string }`. 204. Errors: 400 missing URL; 422 already broadcasting; 500 start failure.
+- POST `/api/room/broadcast/stop`: Stop broadcast. 204. Error: 422 not broadcasting.
+
+Room Clipboard
+- GET `/api/room/clipboard`: Get clipboard text/HTML.
+  - Response: `{ text?: string, html?: string }`.
+- POST `/api/room/clipboard`: Set clipboard text/HTML. 204.
+  - Request: `{ text?: string, html?: string }`.
+- GET `/api/room/clipboard/image.png`: Get clipboard image.
+  - Response: `image/png` binary.
+
+Room Keyboard
+- GET `/api/room/keyboard/map`: Get keyboard map.
+  - Response: `{ layout?: string, variant?: string }`.
+- POST `/api/room/keyboard/map`: Set keyboard map. 204.
+  - Request: `{ layout?: string, variant?: string }`.
+- GET `/api/room/keyboard/modifiers`: Get keyboard modifiers.
+  - Response: `{ shift?, capslock?, control?, alt?, numlock?, meta?, super?, altgr? }: boolean`.
+- POST `/api/room/keyboard/modifiers`: Set modifiers. 204.
+  - Request: same shape as response.
+
+Room Control
+- GET `/api/room/control`: Get control status.
+  - Response: `{ has_host: boolean, host_id?: string }`.
+- POST `/api/room/control/request`: Request host control. 204. Error: 422 already has host.
+- POST `/api/room/control/release`: Release control. 204.
+- POST `/api/room/control/take`: Take control (admin/host override). 204.
+- POST `/api/room/control/give/{sessionId}`: Give control to session. 204.
+  - Path: `sessionId` string. Errors: 400 target can’t host; 404 unknown session.
+- POST `/api/room/control/reset`: Reset control state. 204.
+
+Room Screen
+- GET `/api/room/screen`: Get current screen config.
+  - Response: `ScreenConfiguration`.
+- POST `/api/room/screen`: Change screen config.
+  - Request/Response: `ScreenConfiguration`. Errors: 422 invalid config.
+- GET `/api/room/screen/configurations`: List available configurations.
+  - Response: `ScreenConfiguration[]`.
+- GET `/api/room/screen/cast.jpg`: Current screencast JPEG.
+  - Response: `image/jpeg`. Errors: 400 screencast disabled; 500 fetch error.
+- GET `/api/room/screen/shot.jpg`: On-demand screenshot JPEG.
+  - Query: `quality` integer (0–100). Response: `image/jpeg`. Errors: 500 create image.
+
+Room Upload
+- POST `/api/room/upload/drop`: Upload files and drop at coordinates. 204.
+  - multipart/form-data: `x: number`, `y: number`, `files: file[]`.
+  - Errors: 400 upload error; 500 processing error.
+- POST `/api/room/upload/dialog`: Upload files to active dialog. 204.
+  - multipart/form-data: `files: file[]`. Errors: 422 no dialog.
+- DELETE `/api/room/upload/dialog`: Close file chooser dialog. 204. Error: 422 no dialog.
+
+Members
+- GET `/api/members`: List members.
+  - Query: `limit?: number`, `offset?: number`.
+  - Response: `MemberData[]`.
+- POST `/api/members`: Create member.
+  - Request: `MemberCreate`.
+  - Response: `MemberData`. Error: 422 ID exists.
+- GET `/api/members/{memberId}`: Get member profile.
+  - Response: `MemberProfile`. 404 if not found.
+- POST `/api/members/{memberId}`: Update member profile. 204.
+  - Request: `MemberProfile`.
+- DELETE `/api/members/{memberId}`: Remove member. 204.
+- POST `/api/members/{memberId}/password`: Update member password. 204.
+  - Request: `{ password: string }`.
+- POST `/api/members_bulk/update`: Bulk update member profiles. 204.
+  - Request: `{ ids: string[], profile: MemberProfile }`.
+- POST `/api/members_bulk/delete`: Bulk delete members. 204.
+  - Request: `{ ids: string[] }`.
+
+Schemas (Shapes)
+- `SessionData`: `{ id: string, profile: MemberProfile, state: { is_connected: boolean, is_watching: boolean } }`.
+- `MemberProfile`: `{ name?: string, is_admin?: boolean, can_login?: boolean, can_connect?: boolean, can_watch?: boolean, can_host?: boolean, can_share_media?: boolean, can_access_clipboard?: boolean, sends_inactive_cursor?: boolean, can_see_inactive_cursors?: boolean, plugins?: object }`.
+- `MemberData`: `{ id: string, profile: MemberProfile }`.
+- `MemberCreate`: `{ username: string, password: string, profile?: MemberProfile }`.
+- `Settings`: `{ private_mode?, locked_controls?, implicit_hosting?, inactive_cursors?, merciful_reconnect?, plugins?: object }`.
+- `ScreenConfiguration`: `{ width: number, height: number, rate: number }`.
+- `KeyboardMap`: `{ layout?: string, variant?: string }`; `KeyboardModifiers`: all booleans listed above.
+- `BroadcastStatus`: `{ url?: string, is_active: boolean }`.
+- `ClipboardText`: `{ text?: string, html?: string }`.
+- `ErrorMessage`: `{ message: string }` (for 4xx/5xx bodies).
+
+Notes
+- Unless stated, successful POSTs return 204 No Content; GETs return JSON bodies per schema.
+- Image endpoints return binary JPEG/PNG with appropriate content types.
+- Security schemes in effect globally: Bearer, Cookie, or token query; `/api/login` has security disabled.
+
+## Complete WebSocket API
+- Envelope: `{ "event": string, "payload": any }`. Connect to `ws(s)://<host>/api/ws` with cookie, Bearer, or `?token=`.
+- Heartbeats: server sends `system/heartbeat` ~10s and low-level pings; clients may send `client/heartbeat` (no payloads).
+
+System
+- Server → Client `system/init`:
+  - `{ session_id: string, control_host: { id?: string, has_host: boolean, host_id?: string }, screen_size: { width, height, rate }, sessions: { [id]: { id, profile: MemberProfile, state: SessionState } }, settings: Settings, touch_events: boolean, screencast_enabled: boolean, webrtc: { videos: string[] } }`.
+- Server → Client (admins) `system/admin`:
+  - `{ screen_sizes_list: ScreenSize[], broadcast_status: { is_active: boolean, url?: string } }`.
+- Server → Client `system/settings`: `{ id: string, ...Settings }` (actor `id`, new settings).
+- Client → Server `system/logs`: `[{ level: 'debug'|'info'|'warn'|'error', fields?: object, message: string }]`.
+- Server → Client `system/disconnect`: `{ message: string }`.
+
+Signaling (WebRTC)
+- Client → Server `signal/request`: `{ video: { disabled?: boolean, selector?: { id: string, type: 'exact'|'best' }, auto?: boolean }, audio: { disabled?: boolean }, auto?: boolean }`.
+- Server → Client `signal/provide`: `{ sdp: string, iceservers: [{ urls: string[], username?: string, credential?: string }], video: { disabled: boolean, id: string, video?: string, auto: boolean }, audio: { disabled: boolean } }`.
+- Client ↔ Server `signal/offer` | `signal/answer`: `{ sdp: string }` (direction depends on negotiation; Neko often offers first via `signal/provide`).
+- Client → Server `signal/candidate`: `{ candidate: string, sdpMid?: string, sdpMLineIndex?: number }`.
+- Client → Server `signal/video`: `{ disabled?: boolean, selector?: { id: string, type: 'exact'|'best' }, auto?: boolean }`.
+- Client → Server `signal/audio`: `{ disabled?: boolean }`.
+- Server → Client `signal/restart`: `{ sdp: string }` (ICE restart offer).
+- Server → Client `signal/close`: null payload (peer disconnected).
+
+Sessions
+- Server → Client `session/created`: `{ id, profile: MemberProfile, state: SessionState }`.
+- Server → Client `session/deleted`: `{ id }`.
+- Server → Client `session/profile`: `{ id, ...MemberProfile }`.
+- Server → Client `session/state`: `{ id, is_connected, connected_since?, not_connected_since?, is_watching, watching_since?, not_watching_since? }`.
+- Server → Client `session/cursors`: `[{ id: string, cursors: { x: number, y: number }[] }]` (only when `settings.inactive_cursors` enabled).
+
+Control & Input
+- Server ↔ Client `control/request`:
+  - Client → Server: no payload (request host control).
+  - Server → Client (to current host): `{ id: string }` (requester id).
+- Server → Client `control/host`: `{ id: string, has_host: boolean, host_id?: string }`.
+- Client → Server `control/release`: no payload (only host; requires `can_host`).
+- Client → Server `control/move`: `{ x, y }`.
+- Client → Server `control/scroll`: `{ delta_x?: number, delta_y?: number, control_key?: boolean }` (legacy `{ x, y }` supported).
+- Client → Server `control/buttonpress|buttondown|buttonup`: `{ code: uint32, x?: number, y?: number }`.
+- Client → Server `control/keypress|keydown|keyup`: `{ keysym: uint32, x?: number, y?: number }`.
+- Client → Server `control/touchbegin|touchupdate|touchend`: `{ touch_id: uint32, x: number, y: number, pressure: uint8 }`.
+- Client → Server `control/cut|control/copy|control/select_all`: no payload.
+- Client → Server `control/paste`: `{ text?: string }` (optionally seeds clipboard first).
+- Notes: Control requires `profile.can_host` and either being host or implicit hosting; clipboard ops also require `profile.can_access_clipboard`.
+
+Screen
+- Client → Server `screen/set`: `{ width, height, rate }` (admin only).
+- Server → Client `screen/updated`: `{ id: string, width, height, rate }`.
+
+Clipboard
+- Client → Server `clipboard/set`: `{ text: string }` (host with clipboard permission).
+- Server → Client `clipboard/updated`: `{ text: string }` (sent to host on OS clipboard change).
+
+Keyboard
+- Client → Server `keyboard/map`: `{ layout?: string, variant?: string }` (host only).
+- Client → Server `keyboard/modifiers`: `{ shift?, capslock?, control?, alt?, numlock?, meta?, super?, altgr? }` (host only; omitted fields unchanged).
+
+Broadcast
+- Server → Client (admins) `broadcast/status`: `{ is_active: boolean, url?: string }`.
+
+Opaque Send Channel
+- Client → Server `send/unicast`: `{ receiver: string, subject: string, body: any }` → forwarded to receiver as `{ sender, receiver, subject, body }`.
+- Client → Server `send/broadcast`: `{ subject: string, body: any }` → broadcast to others as `{ sender, subject, body }`.
+
+File Chooser Dialog
+- Server → Client `file_chooser_dialog/opened`: `{ id: string }` (host holding dialog).
+- Server → Client `file_chooser_dialog/closed`: `{}`.
+
+Shared Types (payload shapes)
+- `MemberProfile`: `{ name?: string, is_admin?, can_login?, can_connect?, can_watch?, can_host?, can_share_media?, can_access_clipboard?, sends_inactive_cursor?, can_see_inactive_cursors?, plugins?: object }`.
+- `SessionState`: `{ is_connected: boolean, connected_since?: string, not_connected_since?: string, is_watching: boolean, watching_since?: string, not_watching_since?: string }` (ISO timestamps).
+- `Settings` (WS): `{ private_mode, locked_logins, locked_controls, control_protection, implicit_hosting, inactive_cursors, merciful_reconnect, heartbeat_interval, plugins?: object }`.
+- `ScreenSize`: `{ width: number, height: number, rate: number }`.
+- `KeyboardMap`: `{ layout: string, variant: string }`; `KeyboardModifiers`: booleans listed above.
+- `Cursor`: `{ x: number, y: number }`.
+
+### Heartbeat & Reconnect Behavior
+- Layers of liveness
+  - WebSocket ping/pong: Server sends a WS Ping every ~10s and also emits `system/heartbeat` in-band. Browsers auto‑reply with Pong; no client code is needed for WS Pong.
+  - Client heartbeat event: Clients may send `client/heartbeat` at a cadence derived from `settings.heartbeat_interval` (default 120s). The server accepts it but does not strictly require it for liveness; it’s useful for analytics and legacy bridges.
+- Settings and defaults
+  - `session.heartbeat_interval` (default 120s) is included in `system/init.settings.heartbeat_interval` for the client to display/use.
+  - `session.merciful_reconnect` (default true): If a session is “already connected” and a new WS arrives, the server replaces the old connection instead of rejecting it. With this off, a second connection is rejected with reason “already connected”.
+- Timeouts and proxies
+  - Ensure reverse proxies have read timeouts comfortably above both the WS Ping cadence (~10s) and the client heartbeat interval (≥120s). Recommended `proxy_read_timeout ≥ 300s` and to forward Upgrade/Connection headers for WebSocket.
+  - Avoid aggressive idle timeouts on L4/L7 load balancers that terminate idle TCP flows under a few minutes; set ≥5 minutes where possible.
+- Disconnect semantics
+  - If WS Ping fails or the socket errors, the server closes the connection and sends `system/disconnect {message}` when possible. The session is marked disconnected; clients should auto‑reconnect and renegotiate WebRTC.
+  - On WebRTC transport loss, the server emits `signal/close`; clients should re‑issue `signal/request` or handle `signal/restart`.
+- Troubleshooting frequent drops
+  - Blackouts every N seconds: increase reverse proxy `proxy_read_timeout`/keep‑alive timeouts; confirm no CDN/WebApp firewall is in the WS path.
+  - “already connected” on reconnect: enable/keep `session.merciful_reconnect=true` (default), or ensure clients close prior tabs before reconnecting.
+  - Mobile/background tabs: some OSes suspend WS/Pong; expect disconnects when backgrounded. The client must reconnect on resume.
+
+### Legacy WebSocket Events (v2 Compatibility Proxy)
+- Enabled when legacy mode is active (see `server/internal/http/manager.go` uses viper `legacy`). The legacy bridge maps v3 events to v2 event names for old clients and also emits some additional compatibility messages.
+- Envelope: legacy messages also use `{event, ...payload}`.
+
+- System:
+  - `system/init`: `{ locks: {login?, control?, file_transfer?}: string map, implicit_hosting: boolean, file_transfer: boolean, heartbeat_interval: number }`.
+  - `system/disconnect`: `{ title?: string, message: string }`.
+  - `system/error`: historical; emitted by legacy paths on errors.
+- Members:
+  - `member/list`: `{ members: [{ id, name, admin: boolean, muted: boolean }] }`.
+  - `member/connected`: `{ id, name, admin, muted }`.
+  - `member/disconnected`: `{ id }`.
+- Signaling:
+  - `signal/provide`: `{ id: string, sdp: string, lite: boolean, ice: [{ urls, username?, credential? }] }`.
+  - `signal/offer`: `{ sdp: string }`.
+  - `signal/answer`: `{ displayname: string, sdp: string }`.
+  - `signal/candidate`: `{ data: string }` (raw ICE JSON as string).
+- Control/Admin (compatibility notifications):
+  - `control/locked`: `{ id: string }` (lock established).
+  - `control/release`: `{ id: string }`.
+  - `control/request`: client-originated; `control/requesting`: notification to host; `control/give`: `{ id, target }`.
+  - `control/clipboard`: `{ text: string }`.
+  - `control/keyboard`: `{ layout?: string, capsLock?: boolean, numLock?: boolean, scrollLock?: boolean }`.
+  - `admin/lock|unlock`: `{ resource: 'control'|'login'|'file_transfer', id: string }`.
+  - `admin/control|release|give`: `{ id: string }` or `{ id, target }`.
+  - `admin/ban|kick|mute|unmute`: `{ id: string }` or `{ target: string, id: string }`.
+- Chat (legacy plugin messages):
+  - `chat/message`: send/receive `{ id?: string, content: string }`.
+  - `chat/emote`: send/receive `{ id?: string, emote: string }`.
+- Filetransfer (legacy plugin messages):
+  - `filetransfer/list`: `{ cwd: string, files: [{ name, size, is_dir, mtime, perms, ... }] }`.
+  - `filetransfer/refresh`: same shape as list (triggered refresh).
+- Screen/Broadcast:
+  - `screen/configurations`: `{ configurations: { [idx]: { width, height, rates: { [idx]: rate } } } }`.
+  - `screen/resolution`: `{ id?: string, width, height, rate }`.
+  - `screen/set`: `{ width, height, rate }`.
+  - `broadcast/status`: `{ url: string, isActive: boolean }`.
+  - `broadcast/create`: `{ url: string }`; `broadcast/destroy`: no payload.
+
 ## 1. What Neko Is (Concept & Origin)
 Neko (often styled **n.eko**) is an open‑source, self‑hosted *virtual* browser / remote desktop environment: you run a containerized Linux desktop with a preinstalled browser (Firefox, Chromium, etc.) on your own infrastructure; Neko streams the interactive desktop (video, audio, input) to remote clients via WebRTC, so multiple participants can watch and even take control in real time.  [GitHub](https://github.com/m1k1o/neko) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/introduction) [heise online](https://www.heise.de/en/news/Virtual-browser-environment-Use-Firefox-Chrome-Co-in-Docker-with-Neko-3-0-10337659.html)
 
@@ -22,13 +323,13 @@ At a high level, a Neko deployment comprises:
 - **Optional ecosystem services:** REST API, Prometheus metrics exporter, plugin hooks (chat, file upload), and higher‑level orchestration projects (Neko Rooms / Apps / VPN).  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/reverse-proxy-setup) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/introduction)
 ## 4. Feature Inventory (v3 era)
 - **Multi‑user concurrent session w/ host handoff + inactive cursors:** Participants can join; privileges (watch / host / share media / clipboard) governed per‑member profile.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/authentication) [GitHub](https://github.com/m1k1o/neko) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/introduction)
-- **Audio + video streaming w/ low latency:** WebRTC transport from container to clients; GStreamer capture; optional simulcast & stream selector to adjust quality.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/webrtc) [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/introduction)
+- **Audio + video streaming w/ low latency:** WebRTC transport from container to clients; GStreamer capture; stream selector to adjust quality.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/webrtc) [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/introduction)
 - **GPU acceleration modes (Intel/Nvidia flavors) & CPU builds:** Select appropriate image flavor to offload encoding & improve responsiveness; GPU support maturity varies—docs caution focus currently on CPU images.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/installation/docker-images) [heise online](https://www.heise.de/en/news/Virtual-browser-environment-Use-Firefox-Chrome-Co-in-Docker-with-Neko-3-0-10337659.html) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/introduction)
 - **Granular auth/authorization (admin vs user; fine‑grained caps):** Role bits include can_login, can_connect, can_watch, can_host, can_share_media, can_access_clipboard, etc.; supports multiuser password split, file‑backed users, in‑memory object sets, and no‑auth (dev only).  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/authentication) [GitHub](https://github.com/m1k1o/neko/releases)
 - **REST API + API token (admin programmatic control) & batch HTTP:** Added in v3; enables external orchestration, dynamic user provisioning, and admin operations without interactive login; API token should be short‑lived in ephemeral rooms.  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/authentication)
 - **Prometheus metrics & pprof profiling:** Expose runtime health / performance metrics; integrate into observability stacks; profiling hooks assist tuning.  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/faq)
 - **Desktop quality‑of‑life:** Clipboard reworked via xclip; drag‑and‑drop & file chooser upload; touchscreen input driver; dynamic resolution via xrandr; cursor image events.  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/faq)
-- **Capture fallback + webcam/mic passthrough (experimental):** Screencast fallback path when WebRTC capture problematic; optional user media upstream.  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/webrtc)
+- **Screencast endpoints + webcam/mic passthrough (experimental):** HTTP/JPEG screencast endpoints for snapshots/casting; optional upstream of user webcam/mic.  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/webrtc)
 - **Plugin system (chat, file upload, user‑scoped plugin config map).**  [GitHub](https://github.com/m1k1o/neko/releases) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/authentication) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/faq)
 ## 5. Supported Browsers / Apps / Desktops
 Neko ships many tagged images; availability varies by architecture and GPU flavor. Current matrix (AMD64 strongest support): Firefox, Waterfox, Tor Browser; Chromium family incl. Google Chrome, Microsoft Edge, Brave, Vivaldi, Opera; plus Ungoogled Chromium. Additional desktop/media apps: KDE, Xfce, Remmina, VLC. ARM support exists for subsets (e.g., Brave & Vivaldi on ARM64; some lack DRM).  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/installation/docker-images) [heise online](https://www.heise.de/en/news/Virtual-browser-environment-Use-Firefox-Chrome-Co-in-Docker-with-Neko-3-0-10337659.html) [GitHub](https://github.com/m1k1o/neko/releases)
@@ -189,7 +490,7 @@ Unlike simple remote‑automation containers, Neko can run *any* Linux GUI appli
 ### Versioning: v3 vs v2 & Legacy Mode
 Neko v3 reorganized configuration into modular namespaces (server, member, session, webrtc, desktop, capture, plugins, etc.) and introduced providers; however, v3 retains *backward compatibility* with v2 environment variables when `NEKO_LEGACY=true` is set (and some legacy features auto‑detected). A migration table maps every major v2 var to its v3 equivalent (e.g., `NEKO_SCREEN`→`NEKO_DESKTOP_SCREEN`; `NEKO_PASSWORD`→`NEKO_MEMBER_MULTIUSER_USER_PASSWORD`; `NEKO_NAT1TO1`→`NEKO_WEBRTC_NAT1TO1`). This is critical when modernizing older compose files (like the snippet you shared) to avoid silent fallbacks and dual‑stream cursor quirks.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/migration-from-v2) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/authentication)
 
-Heise’s Neko 3.0 coverage underscores why migrating matters: new browser flavors (Waterfox, additional Chromium builds, ARM variants), GPU‑accelerated options, screencast fallback, plugin ecosystem growth, and structural config changes—all shipping under a maintained Apache‑2.0 project—mean staying current pays dividends in stability and capability.  [heise online](https://www.heise.de/en/news/Virtual-browser-environment-Use-Firefox-Chrome-Co-in-Docker-with-Neko-3-0-10337659.html) [GitHub](https://github.com/m1k1o/neko)
+Heise’s Neko 3.0 coverage underscores why migrating matters: new browser flavors (Waterfox, additional Chromium builds, ARM variants), GPU‑accelerated options, HTTP/JPEG screencast endpoints, plugin ecosystem growth, and structural config changes—all shipping under a maintained Apache‑2.0 project—mean staying current pays dividends in stability and capability.  [heise online](https://www.heise.de/en/news/Virtual-browser-environment-Use-Firefox-Chrome-Co-in-Docker-with-Neko-3-0-10337659.html) [GitHub](https://github.com/m1k1o/neko)
 
 Community quick‑start guides still widely circulate v2 envs (e.g., `NEKO_SCREEN`, `NEKO_PASSWORD`, `NEKO_ICELITE`, `NEKO_EPR`), which “work” only because legacy support remains—but they obscure v3 tuning knobs and can yield performance or auth surprises (e.g., no granular per‑user policy). Use the migration mapping to upgrade; I’ll show a patched compose below.  [fossengineer.com](https://fossengineer.com/selfhosting-neko-browser/) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/migration-from-v2)
 ### Authentication Model (v3)
@@ -226,7 +527,7 @@ You posted a two‑service stack: `neko` (using `m1k1o/neko:chromium`) and an `n
 
 - **3. Public vs Private Subnet** – Your custom Docker subnet `17.100.0.0/16` collides with publicly routed Apple allocations (17.0.0.0/8 owned by Apple); choose RFC1918 (e.g., `172.31.0.0/16` or `10.67.0.0/16`) to avoid confusing clients seeing ICE candidates referencing real vs container ranges. Proper NAT1TO1 matters when advertising ICE addresses.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/configuration/webrtc) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/reverse-proxy-setup)
 
-- **4. Proxy Headers & Timeouts** – Good start; ensure `proxy_read_timeout` ≥ Neko heartbeat (≥120s) and that `NEKO_SERVER_PROXY=1` (or config) is set so Neko trusts forwarded IPs; align with official reverse proxy doc + community NPM thread.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/reverse-proxy-setup) [Reddit](https://www.reddit.com/r/nginxproxymanager/comments/ut8zyu/help_with_setting_up_reverse_proxy_custom_headers/)
+- **4. Proxy Headers & Timeouts** – Good start; ensure `proxy_read_timeout` is comfortably above Neko’s WebSocket ping interval (~10s)—set ≥60s or higher—and that `NEKO_SERVER_PROXY=1` (or config) is set so Neko trusts forwarded IPs; align with official reverse proxy doc + community NPM thread.  [neko.m1k1o.net](https://neko.m1k1o.net/docs/v3/reverse-proxy-setup) [Reddit](https://www.reddit.com/r/nginxproxymanager/comments/ut8zyu/help_with_setting_up_reverse_proxy_custom_headers/)
 
 - **5. Chromium Capability / Sandbox** – You added `cap_add: SYS_ADMIN` (good) *and* `--no-sandbox` (less secure). Consider removing `--no-sandbox` once you confirm kernel support; Neko experiences black screens without SYS_ADMIN in Chromium images; Puppeteer’s hardened image docs reinforce giving SYS_ADMIN if you want sandbox.  [pptr.dev](https://pptr.dev/guides/docker) [neko.m1k1o.net](https://neko.m1k1o.net/docs/v2/troubleshooting)
 
@@ -498,7 +799,8 @@ console.log('Result', msg.id, msg.result);
 console.error('CDP Error', msg.error);
 }
 });
-})();```
+})();
+```
 [Stack Overflow](https://stackoverflow.com/questions/58428213/how-to-access-remote-debugging-page-for-dockerized-chromium-launch-by-puppeteer) [Playwright](https://playwright.dev/docs/api/class-cdpsession) [Playwright](https://playwright.dev/docs/api/class-browsertype)
 ### Operational Checklist for Playwright‑Augmented Neko
 | Check | Why | How to Verify |
@@ -551,7 +853,7 @@ You can deploy via raw Docker/Compose, room orchestration stacks (neko‑rooms),
 ## 3. Connection Lifecycle
 1. **Upgrade:** Gorilla WS server handles `/api/ws`, performs token/cookie/Bearer/session check.
 2. **Init:** Server pushes `system/init` (JSON: session id, settings, role).
-3. **Heartbeat:** Server sends `system/heartbeat`; client must reply with `client/heartbeat` or be disconnected.
+3. **Heartbeat:** Server sends `system/heartbeat`; clients may reply with `client/heartbeat`, but liveness relies on WebSocket ping/pong.
 4. **All interaction now flows over the socket:** control events (keyboard/mouse), signaling (ICE, SDP), system/broadcast, errors.
 5. **All client state (host, cursor, input, session, etc.) is managed by events.**
 ## 4. How Media (Frames) and Control Flow
@@ -617,7 +919,7 @@ While a client can maintain a static table of common X11 keysyms, the most robus
 - **Strategy:** Maintain a default, built-in keysym map but dynamically update or extend it with the values received from the server at runtime. This ensures maximum compatibility across different keyboard layouts and server versions.
 
 ### 5.3 Liveness and Error Handling
-- **Heartbeats:** The server periodically sends a `system/heartbeat` event. A client **must** reply with a `client/heartbeat` message. Failure to do so will result in the server terminating the connection.
+- **Heartbeats:** The server periodically sends a `system/heartbeat` event and also issues WebSocket pings. Clients may optionally send `client/heartbeat`, but connection liveness primarily depends on WebSocket ping/pong; lack of `client/heartbeat` alone does not cause disconnection.
 - **Error Events:** A client should listen for and surface all `error/...` events. These provide crucial feedback from the server if a sent command was malformed, rejected, or failed, which is essential for debugging.
 
 ### 5.4 Robust Input Handling

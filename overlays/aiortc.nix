@@ -5,8 +5,8 @@ self: super: {
       version  = "1.13.0";
       format   = "setuptools";
       src      = super.fetchFromGitHub {
-        owner = "aiortc"; repo = "aiortc"; rev = "v${version}";
-        sha256 = "sha256-yttzFfSbmhnAm+Lp7PgQL7iwzGNnOMm39OYG6SglbHI=";
+      owner = "aiortc"; repo = "aiortc"; rev = "${version}";
+      sha256 = "sha256-f3Ag1YrIkDCO2Cg047Lf+1x18+bzhUAizkh/0RwASMU=";
       };
       propagatedBuildInputs = [
         super.python3Packages.pylibsrtp

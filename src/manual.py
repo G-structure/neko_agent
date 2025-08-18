@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-neko_manual_cli.py — Manual Control REPL for a Neko v3 Server.
+neko_manual_cli.py — Production-Ready Manual Control REPL for a Neko v3 Server.
 
 This script provides a command-line interface for manually interacting with a
 Neko v3 instance. It correctly implements the WebRTC signaling handshake
@@ -88,6 +88,7 @@ class Broker:
     :vartype queues: Dict[str, asyncio.Queue]
     """
     def __init__(self):
+        """Initialize a new Broker with an empty queues dictionary."""
         self.queues: Dict[str, asyncio.Queue] = {}
 
     def topic_queue(self, topic: str, maxsize: int = 512) -> asyncio.Queue:
@@ -143,6 +144,13 @@ class Signaler:
     :vartype _closed: asyncio.Event
     """
     def __init__(self, url: str, **wsopts):
+        """Initialize a new Signaler for the given WebSocket URL.
+        
+        :param url: WebSocket URL to connect to
+        :type url: str
+        :param wsopts: Additional options passed to websockets.connect
+        :type wsopts: dict
+        """
         self.url = url
         self.wsopts = dict(ping_interval=10, ping_timeout=20, max_queue=256, **wsopts)
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -150,12 +158,13 @@ class Signaler:
         self._sendq: asyncio.Queue = asyncio.Queue(maxsize=256)
         self.broker = Broker()
         self._closed = asyncio.Event()
-
+        
     async def _cleanup_tasks(self) -> None:
         """Clean up any existing tasks before reconnecting.
-
-        :return: None
-        :rtype: None
+        
+        Cancels all tasks in the task set and waits for them to complete
+        before clearing the set. This ensures clean shutdown and prevents
+        resource leaks during reconnection.
         """
         for task in list(self._tasks):
             if not task.done():
@@ -176,13 +185,13 @@ class Signaler:
             try:
                 # Clean up any existing tasks before reconnecting
                 await self._cleanup_tasks()
-
+                
                 self.ws = await websockets.connect(self.url, **self.wsopts)
                 logger.info("WebSocket connected to %s", self.url)
-
+                
                 # Clear the closed event for this new connection
                 self._closed.clear()
-
+                
                 self._tasks.add(asyncio.create_task(self._read_loop(), name="ws-read"))
                 self._tasks.add(asyncio.create_task(self._send_loop(), name="ws-send"))
                 return self
@@ -195,23 +204,29 @@ class Signaler:
     async def close(self) -> None:
         """Stop loops and close the connection."""
         self._closed.set()
-
+        
         # Cancel all tasks first
         for task in list(self._tasks):
             if not task.done():
                 task.cancel()
-
+        
         # Wait for tasks to complete cancellation
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
-
+        
         # Then close WebSocket
         if self.ws and not getattr(self.ws, "closed", True):
             with contextlib.suppress(Exception):
                 await self.ws.close()
 
     async def _read_loop(self) -> None:
+        """Background loop that reads messages from the WebSocket.
+        
+        Continuously reads raw messages from the WebSocket connection,
+        parses them as JSON, and publishes them to the appropriate broker
+        topic queue. Handles connection errors and cancellation gracefully.
+        """
         try:
             logger.debug("Read loop started, waiting for messages...")
             async for raw in self.ws:
@@ -223,7 +238,7 @@ class Signaler:
                     continue
                 self.broker.publish(msg)
         except (websockets.ConnectionClosedError, websockets.ConnectionClosedOK) as e:
-            logger.warning("WS connection closed in read loop: %s (code=%s, reason=%s)",
+            logger.warning("WS connection closed in read loop: %s (code=%s, reason=%s)", 
                           e, getattr(e, "code", None), getattr(e, "reason", None))
         except asyncio.CancelledError:
             logger.info("WS read loop cancelled.")
@@ -231,6 +246,12 @@ class Signaler:
             self._closed.set()
 
     async def _send_loop(self) -> None:
+        """Background loop that sends queued messages to the WebSocket.
+        
+        Continuously takes messages from the send queue and transmits them
+        as JSON over the WebSocket. Re-queues messages if the connection
+        is closed and exits gracefully on cancellation.
+        """
         try:
             while not self._closed.is_set():
                 msg = await self._sendq.get()
@@ -383,13 +404,35 @@ class ManualCLI:
     :ivar _cury: Last cursor Y used for button events.
     :vartype _cury: int
     """
-    def __init__(self, ws: str, width: int, height: int, normalized: bool, auto_host: bool, request_media: bool, base_url: Optional[str] = None, token: Optional[str] = None):
+    def __init__(self, ws: str, width: int, height: int, normalized: bool, auto_host: bool, request_media: bool, base_url: Optional[str] = None, token: Optional[str] = None, audio: bool = True):
+        """Initialize a new ManualCLI instance.
+        
+        :param ws: WebSocket URL with authentication token
+        :type ws: str
+        :param width: Virtual screen width for coordinate scaling
+        :type width: int
+        :param height: Virtual screen height for coordinate scaling
+        :type height: int
+        :param normalized: Whether to treat input coordinates as 0..1 normalized values
+        :type normalized: bool
+        :param auto_host: Whether to automatically request host control
+        :type auto_host: bool
+        :param request_media: Whether to perform WebRTC signaling
+        :type request_media: bool
+        :param base_url: Base URL for REST API calls (optional)
+        :type base_url: Optional[str]
+        :param token: Authentication token for REST API calls (optional)
+        :type token: Optional[str]
+        :param audio: Whether to enable audio streaming
+        :type audio: bool
+        """
         self.ws_url = ws
         self.width = width
         self.height = height
         self.normalized = normalized
         self.auto_host = auto_host
         self.request_media = request_media
+        self.audio = audio
         self.base_url = base_url
         self.token = token
         self.signaler: Optional[Signaler] = None
@@ -454,9 +497,9 @@ class ManualCLI:
             # Don't create a new signaler each time - reuse the existing one
             if not self.signaler:
                 self.signaler = Signaler(self.ws_url)
-
+            
             await self.signaler.connect_with_backoff()
-
+            
             if not self.signaler.ws or getattr(self.signaler.ws, "closed", True):
                 if not self.running:
                     break
@@ -467,10 +510,11 @@ class ManualCLI:
             try:
                 # Initial requests after (re)connect
                 if self.request_media:
-                    await self._safe_send({"event": "signal/request", "payload": {"video": {}, "audio": {}}})
+                    audio_payload = {} if self.audio else {"disabled": True}
+                    await self._safe_send({"event": "signal/request", "payload": {"video": {}, "audio": audio_payload}})
                 if self.auto_host:
                     await self._safe_send({"event": "control/request"})
-
+                
                 # Only start tasks if connection is still open
                 if self.signaler.ws and not getattr(self.signaler.ws, "closed", True):
                     self._tasks.add(asyncio.create_task(self._event_logger(), name="event-logger"))
@@ -479,7 +523,7 @@ class ManualCLI:
                 else:
                     logger.warning("Connection closed before tasks could start")
                     continue
-
+                    
             except Exception as e:
                 logger.error("Failed to send initial messages: %s", e)
                 await self._teardown_connection()
@@ -488,7 +532,7 @@ class ManualCLI:
 
             # Wait until this connection is closed
             await self.signaler._closed.wait()
-
+            
             logger.warning("Disconnected — attempting to reconnect")
             await self._teardown_connection()
             await asyncio.sleep(0.5)
@@ -573,8 +617,16 @@ class ManualCLI:
             else:
                 print("usage: key <KeyName>")
             return
-        if cmd in ("copy", "paste", "cut", "select_all"):
+        if cmd in ("copy", "cut", "select_all"):
             await self._safe_send({"event": f"control/{cmd}"})
+            return
+        if cmd == "paste":
+            # Paste supports optional text argument
+            if rest:
+                text = " ".join(rest)
+                await self._safe_send({"event": "control/paste", "payload": {"text": text}})
+            else:
+                await self._safe_send({"event": "control/paste", "payload": {"text": ""}})
             return
         if cmd == "scroll":
             await self._handle_scroll(rest)
@@ -583,10 +635,16 @@ class ManualCLI:
             await self._handle_swipe(rest)
             return
         if cmd == "force-take":
-            await self._safe_send({"event": "admin/control"})
+            if not self.session_id:
+                print("\033[91mError: No session ID available. Connect first.\033[0m")
+                return
+            await self._safe_send({"event": "admin/control", "payload": {"id": self.session_id}})
             return
         if cmd == "force-release":
-            await self._safe_send({"event": "admin/release"})
+            if not self.session_id:
+                print("\033[91mError: No session ID available. Connect first.\033[0m")
+                return
+            await self._safe_send({"event": "admin/release", "payload": {"id": self.session_id}})
             return
         if cmd == "kick":
             await self._handle_kick(rest)
@@ -597,6 +655,12 @@ class ManualCLI:
         print(f"\033[91mUnknown command: {cmd}. Try 'help'.\033[0m")
 
     def _print_help(self) -> None:
+        """Print comprehensive help text for all available REPL commands.
+        
+        Displays color-coded command reference including movement, clicking,
+        keyboard input, scrolling, and administrative commands with usage
+        examples and parameter descriptions.
+        """
         print("""\033[1mCommands:\033[0m
   \033[94mhelp\033[0m                         Show this help message.
   \033[94mquit | exit\033[0m                  Close connection and exit.
@@ -621,13 +685,19 @@ class ManualCLI:
   \033[92mtext "some text"\033[0m              Type text at the current cursor focus.
   \033[92menter\033[0m                         Press the Enter/Return key.
   \033[92mkey <KeyName>\033[0m                Press a specific key by name (e.g., Escape, F5, Control).
-  \033[92mcopy | paste | cut | select_all\033[0m Send dedicated clipboard/selection commands.
+  \033[92mcopy | cut | select_all\033[0m      Send dedicated clipboard/selection commands.
+  \033[92mpaste [text]\033[0m                 Paste from clipboard, or paste specific text if provided.
 
   \033[93mscroll <dir> [N]\033[0m             Scroll in a direction (up, down, left, right) N times.
   \033[93mswipe x1 y1 x2 y2\033[0m            Perform a mouse drag gesture from (x1,y1) to (x2,y2).
 """)
 
     def _handle_size(self, args) -> None:
+        """Handle the 'size' command to view or set virtual screen dimensions.
+        
+        :param args: Command arguments - empty to show current size, or ["WxH"] to set new size
+        :type args: list
+        """
         if not args:
             print(f"size {self.width}x{self.height}  normalized={self.normalized}")
         else:
@@ -635,6 +705,11 @@ class ManualCLI:
             print(f"ok size -> {self.width}x{self.height}")
 
     async def _handle_raw(self, args) -> None:
+        """Handle the 'raw' command to send arbitrary JSON messages.
+        
+        :param args: Command arguments containing JSON string to send
+        :type args: list
+        """
         if not args:
             print('usage: raw \'{"event":"...","payload":{}}\'')
             return
@@ -646,6 +721,11 @@ class ManualCLI:
         await self._safe_send(payload)
 
     async def _handle_move(self, args) -> None:
+        """Handle the 'move' command to position the mouse cursor.
+        
+        :param args: Command arguments [x, y] coordinates
+        :type args: list
+        """
         if len(args) < 2:
             print("usage: move X Y")
             return
@@ -653,6 +733,13 @@ class ManualCLI:
         await self._safe_send({"event": "control/move", "payload": {"x": px, "y": py}})
 
     async def _handle_click(self, cmd, args) -> None:
+        """Handle click-related commands including tap, hover, and button presses.
+        
+        :param cmd: The click command type (click, rclick, lclick, dblclick, tap, hover)
+        :type cmd: str
+        :param args: Command arguments which may include coordinates and button type
+        :type args: list
+        """
         button = "left"
         if cmd == "rclick":
             button = "right"
@@ -673,6 +760,11 @@ class ManualCLI:
             await self._button_press(button)
 
     async def _handle_input(self, args) -> None:
+        """Handle the 'input' command to click at coordinates and type text.
+        
+        :param args: Command arguments [x, y, text] where text may be multiple words
+        :type args: list
+        """
         if len(args) < 3:
             print('usage: input <x> <y> "text"')
             return
@@ -681,6 +773,11 @@ class ManualCLI:
         await self._type_text(" ".join(args[2:]))
 
     async def _handle_scroll(self, args) -> None:
+        """Handle the 'scroll' command to perform scrolling gestures.
+        
+        :param args: Command arguments [direction, amount] where amount defaults to 1
+        :type args: list
+        """
         if not args:
             print('usage: scroll <direction> [amount=1]')
             return
@@ -698,6 +795,11 @@ class ManualCLI:
         await self._safe_send({"event": "control/scroll", "payload": {"delta_x": dx, "delta_y": dy}})
 
     async def _handle_swipe(self, args) -> None:
+        """Handle the 'swipe' command to perform drag gestures between two points.
+        
+        :param args: Command arguments [x1, y1, x2, y2] defining start and end coordinates
+        :type args: list
+        """
         if len(args) < 4:
             print("usage: swipe x1 y1 x2 y2")
             return
@@ -710,6 +812,11 @@ class ManualCLI:
         await self._button_up("left")
 
     async def _handle_kick(self, args) -> None:
+        """Handle the 'kick' admin command to forcibly disconnect a session.
+        
+        :param args: Command arguments [session_id] to identify target session
+        :type args: list
+        """
         if not args:
             print("usage: kick <sessionId>")
             return
@@ -717,65 +824,108 @@ class ManualCLI:
         await self._safe_send({"event": "admin/kick", "payload": {"id": session_id}})
 
     async def _handle_sessions(self) -> None:
+        """Handle the 'sessions' command to list all connected users.
+        
+        Fetches session information from the REST API and displays connected
+        users with their session IDs and host status. Requires authentication
+        credentials from REST login.
+        """
         if not self.base_url or not self.token:
             print("\033[91mSessions command requires REST API access (login with --neko-url credentials)\033[0m")
             return
-
+        
         try:
             sessions_url = f"{self.base_url}/api/sessions"
             headers = {"Authorization": f"Bearer {self.token}"}
-
+            
             # Use asyncio.to_thread to make the blocking requests call non-blocking
             response = await asyncio.to_thread(requests.get, sessions_url, headers=headers, timeout=10.0)
             response.raise_for_status()
-
+            
             sessions_data = response.json()
-
+            
             print("\033[1mConnected Sessions:\033[0m")
             connected_count = 0
-
+            
             for session in sessions_data:
                 session_id = session.get("id", "unknown")
                 profile = session.get("profile", {})
                 state = session.get("state", {})
                 username = profile.get("name", "unknown")
                 is_connected = state.get("is_connected", False)
-
+                
                 if is_connected:
                     connected_count += 1
                     is_host = state.get("is_host", False)
                     host_indicator = " \033[93m[HOST]\033[0m" if is_host else ""
                     print(f"  \033[92m{session_id}\033[0m - {username}{host_indicator}")
-
+            
             if connected_count == 0:
                 print("  \033[93mNo connected sessions found\033[0m")
             else:
                 print(f"\nTotal connected: {connected_count}")
-
+                
         except requests.RequestException as e:
             print(f"\033[91mFailed to fetch sessions: {e}\033[0m")
         except Exception as e:
             print(f"\033[91mError processing sessions: {e}\033[0m")
 
     async def _button_press(self, button: str) -> None:
+        """Send a complete button press (down + up) event.
+        
+        :param button: Button name ("left", "right", "middle")
+        :type button: str
+        """
         await self._safe_send({"event": "control/buttonpress", "payload": {"x": self._curx, "y": self._cury, "code": BUTTON_CODES.get(button, 1)}})
 
     async def _button_down(self, button: str) -> None:
+        """Send a button down event without releasing.
+        
+        :param button: Button name ("left", "right", "middle")
+        :type button: str
+        """
         await self._safe_send({"event": "control/buttondown", "payload": {"x": self._curx, "y": self._cury, "code": BUTTON_CODES.get(button, 1)}})
 
     async def _button_up(self, button: str) -> None:
+        """Send a button up (release) event.
+        
+        :param button: Button name ("left", "right", "middle")
+        :type button: str
+        """
         await self._safe_send({"event": "control/buttonup", "payload": {"x": self._curx, "y": self._cury, "code": BUTTON_CODES.get(button, 1)}})
 
     async def _key_once(self, key: str) -> None:
+        """Send a complete key press (down + up) event.
+        
+        :param key: Key name or character to press
+        :type key: str
+        """
         await self._send_key_event("keypress", key)
 
     async def _key_down(self, key: str) -> None:
+        """Send a key down event without releasing.
+        
+        :param key: Key name or character to press down
+        :type key: str
+        """
         await self._send_key_event("keydown", key)
 
     async def _key_up(self, key: str) -> None:
+        """Send a key up (release) event.
+        
+        :param key: Key name or character to release
+        :type key: str
+        """
         await self._send_key_event("keyup", key)
 
     async def _send_key_event(self, event: str, key: str) -> None:
+        """Send a keyboard event with the specified key.
+        
+        :param event: Event type ("keypress", "keydown", "keyup")
+        :type event: str
+        :param key: Key name or character
+        :type key: str
+        """
         ks = name_keysym(key)
         if not ks:
             print(f"Unknown key: {key}")
@@ -783,6 +933,11 @@ class ManualCLI:
         await self._safe_send({"event": f"control/{event}", "payload": {"keysym": ks}})
 
     async def _type_text(self, text: str) -> None:
+        """Type a string of text by sending individual key press events.
+        
+        :param text: Text string to type, with optional surrounding quotes that are stripped
+        :type text: str
+        """
         if len(text) >= 2 and text[0] == text[-1] in ('"', "'"):
             text = text[1:-1]
         for ch in text:
@@ -791,9 +946,11 @@ class ManualCLI:
                 await self._key_once(ch)
 
     async def _event_logger(self) -> None:
-        """Consume system/control/... topics and keep the REPL prompt tidy.
+        """Background task that processes server events and maintains connection.
 
-        Also responds to `system/heartbeat` with `client/heartbeat`.
+        Consumes messages from the system topic queue, handles heartbeat responses
+        to prevent disconnection, logs server events, and dispatches specific
+        event types to their appropriate handlers.
         """
         q = self.signaler.broker.topic_queue("system")
         while self.running and self.signaler and not self.signaler._closed.is_set():
@@ -804,16 +961,8 @@ class ManualCLI:
 
                 # Heartbeat reply (kept here so it survives reconnects).
                 if ev == "system/heartbeat":
-                    # Send heartbeat and flush immediately to avoid disconnects
+                    # Send heartbeat response to prevent disconnection
                     await self._safe_send({"event": "client/heartbeat"})
-                    # Force flush by sending a no-op message with empty payload
-                    # to ensure the send queue is processed promptly
-                    if self.signaler and self.signaler._sendq:
-                        try:
-                            # Put a no-op message and immediately get it to flush send queue
-                            await self.signaler._sendq.put({"event": "client/noop", "payload": {}})
-                        except Exception:
-                            pass
                     continue
 
                 # Log server events to file instead of CLI
@@ -835,28 +984,66 @@ class ManualCLI:
                 logger.error("Error in event logger: %s", e, exc_info=True)
 
     def _handle_init_event(self, payload: dict) -> None:
-        """Apply initial metadata from the server."""
+        """Process system initialization event from server.
+        
+        Extracts session ID, screen dimensions, and server settings from
+        the initial system event. Updates local state and logs warnings
+        for any server restrictions.
+        
+        :param payload: Event payload containing initialization data
+        :type payload: dict
+        """
         self.session_id = payload.get("session_id")
         if (size := payload.get("screen_size")) and isinstance(size, dict):
             if "width" in size and "height" in size:
                 self.width, self.height = int(size["width"]), int(size["height"])
                 logger.info("Initial screen size set to %dx%d", self.width, self.height)
+        
+        # Check server settings for restrictions
+        if (settings := payload.get("settings")) and isinstance(settings, dict):
+            if settings.get("locked_controls"):
+                logger.warning("Server has locked controls - admin privileges may be required")
+            if settings.get("private_mode"):
+                logger.warning("Server is in private mode")
+            if settings.get("control_protection"):
+                logger.info("Server has control protection enabled")
 
     def _handle_screen_updated(self, payload: dict) -> None:
-        """Apply screen size updates from the server."""
+        """Process screen size change events from server.
+        
+        Updates the local width and height when the server reports
+        a screen resolution change.
+        
+        :param payload: Event payload containing new screen dimensions
+        :type payload: dict
+        """
         if "width" in payload and "height" in payload:
             self.width, self.height = int(payload["width"]), int(payload["height"])
             logger.info("Screen size changed to %dx%d", self.width, self.height)
 
     def _handle_host_changed(self, payload: dict) -> None:
-        """Re-request host if lost and auto_host is enabled."""
+        """Process host control change events.
+        
+        Automatically re-requests host control if it was lost or given to
+        another user and auto_host mode is enabled.
+        
+        :param payload: Event payload containing host status information
+        :type payload: dict
+        """
         host_id = payload.get("host_id")
         if self.auto_host and (not payload.get("has_host") or host_id != self.session_id):
             logger.info("Host control lost or changed, re-requesting.")
             asyncio.create_task(self._safe_send({"event": "control/request"}))
 
     def _handle_keyboard_map(self, payload: dict) -> None:
-        """Accept keyboard map in both shapes: flat dict or {'map': {...}}."""
+        """Process keyboard mapping updates from server.
+        
+        Updates the global KEYSYM dictionary with server-provided key mappings.
+        Accepts both flat dictionary format and nested {'map': {...}} format.
+        
+        :param payload: Event payload containing keyboard mappings
+        :type payload: dict
+        """
         mapping = None
         if isinstance(payload, dict):
             if "map" in payload and isinstance(payload["map"], dict):
@@ -869,11 +1056,12 @@ class ManualCLI:
             logger.info("Updated keyboard map with %d new entries from server.", len(mapping))
 
     async def _consume_signaling(self) -> None:
-        """Perform minimal WebRTC handshake for control acceptance.
+        """Handle WebRTC signaling protocol for media stream negotiation.
 
-        Waits for an SDP offer/provide, strictly maps ICE servers (urls/username/credential),
-        sets the remote description, creates an answer, and then handles
-        incoming ICE candidates. No media tracks are consumed.
+        Performs the complete WebRTC handshake required by Neko servers:
+        waits for SDP offer, configures ICE servers with strict mapping,
+        creates and sends SDP answer, and processes incoming ICE candidates.
+        Media tracks are logged but not processed since this is a control-only client.
         """
         q = self.signaler.broker.topic_queue("signal")
 
@@ -905,14 +1093,30 @@ class ManualCLI:
 
         @self.pc.on("iceconnectionstatechange")
         def on_ice_change() -> None:
+            """Log ICE connection state changes."""
             logger.info("ICE connection state is %s", self.pc.iceConnectionState)
 
         @self.pc.on("connectionstatechange")
         def on_conn_change() -> None:
+            """Log peer connection state changes."""
             logger.info("Peer connection state is %s", self.pc.connectionState)
+
+        @self.pc.on("track")
+        def on_track(track) -> None:
+            """Log received media tracks without processing them.
+            
+            :param track: The media track received from the peer connection
+            """
+            logger.info("Received track: kind=%s id=%s", track.kind, getattr(track, "id", "unknown"))
+            # Manual CLI doesn't process media streams, just log the track
 
         @self.pc.on("icecandidate")
         async def on_cand(cand: Optional[RTCIceCandidate]) -> None:
+            """Send local ICE candidates to the remote peer.
+            
+            :param cand: ICE candidate to send, or None when gathering is complete
+            :type cand: Optional[RTCIceCandidate]
+            """
             if cand:
                 await self._safe_send({
                     "event": "signal/candidate",
@@ -964,7 +1168,12 @@ class ManualCLI:
 
 
 async def main() -> None:
-    """CLI entry point: parse args, build ManualCLI, and run it."""
+    """Main entry point for the Neko manual control CLI.
+    
+    Parses command line arguments, performs REST authentication if needed,
+    creates a ManualCLI instance with the specified configuration, and starts
+    the interactive REPL interface.
+    """
     ap = argparse.ArgumentParser(
         "neko-manual",
         description="Manual control REPL for Neko v3.",
@@ -978,12 +1187,13 @@ async def main() -> None:
     ap.add_argument("--size", default=os.environ.get("NEKO_SIZE", "1280x720"), help="Virtual screen size for scaling, e.g., 1920x1080.")
     ap.add_argument("--no-auto-host", action="store_true", help="Do not automatically request host control.")
     ap.add_argument("--no-media", action="store_true", help="Do not perform WebRTC signaling (may break control).")
+    ap.add_argument("--no-audio", action="store_true", help="Disable audio streaming.")
     args = ap.parse_args()
 
     ws_url = args.ws
     base_url = None
     token = None
-
+    
     if not ws_url:
         if not (args.neko_url and args.username and args.password):
             ap.error("must provide --ws OR all of --neko-url, --username, --password")
@@ -1005,7 +1215,7 @@ async def main() -> None:
     cli = ManualCLI(
         ws=ws_url, width=w, height=h, normalized=args.norm,
         auto_host=not args.no_auto_host, request_media=not args.no_media,
-        base_url=base_url, token=token
+        audio=not args.no_audio, base_url=base_url, token=token
     )
     await cli.start()
 

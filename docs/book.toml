@@ -1,0 +1,55 @@
+[book]
+title = "Neko Agent Documentation"
+description = "Comprehensive documentation for the Neko Agent AI automation platform"
+authors = ["Neko Agent Team"]
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = true
+use-default-preprocessors = true
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/your-org/neko-agent"
+edit-url-template = "https://github.com/your-org/neko-agent/edit/main/docs/src/{path}"
+site-url = "/neko-agent/"
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+copyable = true
+copy-js = true
+line-numbers = true
+editable = true
+runnable = true
+
+
+# hidelines is not supported by current mdBook; remove to avoid parse errors
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]
+
+# Remove linkcheck preprocessor as the version in nixpkgs
+# mismatches mdBook CLI arguments and fails under 0.4.52.
+# You can still run link checks via `mdbook test` when compatible.

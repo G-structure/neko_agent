@@ -9,7 +9,7 @@ self: super: {
         owner = "aiortc";
         repo  = "pylibsrtp";
         rev   = "4b727790393f234c74d45413b267cdcda0f2a2c0";
-        sha256 = "2y//OD7wc0z3YPhUxv6w/5d7Kisk3PrbY90313DmPYs=";
+        sha256 = "sha256-2y//OD7wc0z3YPhUxv6w/5d7Kisk3PrbY90313DmPYs=";
       };
 
       nativeBuildInputs = [
