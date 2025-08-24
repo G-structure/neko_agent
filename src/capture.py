@@ -68,7 +68,6 @@ import shutil
 import signal
 import zipfile
 import logging
-import pathlib
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -77,6 +76,9 @@ from typing import Any, Dict, Optional, List, Tuple
 # third-party (available in flake.nix shells)
 import requests
 import websockets
+
+from neko.logging import setup_logging
+from neko.utils import env_bool, now_iso, safe_mkdir
 
 try:
     # MosaicML Streaming
@@ -93,21 +95,6 @@ except Exception as e:
 # -----------------------
 # Configuration / Env
 # -----------------------
-def env_bool(name: str, default: bool) -> bool:
-    """Parse environment variable as boolean.
-    
-    Converts environment variable values to boolean, supporting both numeric
-    (0/1) and string representations (true/false, yes/no, on/off).
-    
-    :param name: Environment variable name to read
-    :param default: Default value if environment variable is not set
-    :return: Boolean value parsed from environment variable or default
-    """
-    val = os.environ.get(name, str(int(default)))
-    try:
-        return bool(int(val))
-    except Exception:
-        return str(val).lower() in {"true","t","yes","y","on"}
 
 NEKO_URL            = os.environ.get("NEKO_URL", "")
 NEKO_USER           = os.environ.get("NEKO_USER", "")
@@ -131,32 +118,11 @@ LOGLEVEL            = os.environ.get("CAPTURE_LOGLEVEL", "INFO").upper()
 # -----------------------
 # Logging
 # -----------------------
-logging.basicConfig(
-    level=LOGLEVEL,
-    format="[%(asctime)s] %(levelname)-7s %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("capture")
+log = setup_logging(LOGLEVEL, name="capture")
 
 # -----------------------
 # Helpers / Types
 # -----------------------
-def now_iso() -> str:
-    """Return current UTC time in ISO 8601 format.
-    
-    :return: Current UTC timestamp as ISO 8601 string (YYYY-MM-DDTHH:MM:SS)
-    """
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-
-def safe_mkdir(p: str) -> None:
-    """Create directory and any missing parent directories.
-    
-    Safe directory creation that won't fail if the directory already exists
-    and will create any missing parent directories in the path.
-    
-    :param p: Directory path to create
-    """
-    pathlib.Path(p).mkdir(parents=True, exist_ok=True)
 
 @dataclass
 class EpisodeBuffer:

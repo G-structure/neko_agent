@@ -79,52 +79,7 @@ import contextlib
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-
-# --- Logging utilities (no heavy imports here) ---------------------------------
-
-class JsonFormatter(logging.Formatter):
-    """Format log records as JSON.
-
-    :param record: Log record instance
-    :returns: JSON string
-    """
-
-    def format(self, record: logging.LogRecord) -> str:  # noqa: D401
-        data = {
-            "ts": self.formatTime(record, self.datefmt),
-            "level": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        }
-        if record.exc_info:
-            data["exc"] = self.formatException(record.exc_info)
-        return json.dumps(data, ensure_ascii=False)
-
-
-def setup_logging(level: str = "INFO", fmt: str = "text") -> logging.Logger:
-    """Configure root logger with text or JSON formatting.
-
-    :param level: Log level name
-    :param fmt: 'text' or 'json'
-    :returns: Module logger
-    """
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    if fmt.lower() == "json":
-        formatter = JsonFormatter()
-    else:
-        formatter = logging.Formatter(
-            "[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s",
-            datefmt="%H:%M:%S",
-        )
-    h = logging.StreamHandler()
-    h.setFormatter(formatter)
-    root.addHandler(h)
-    root.setLevel(level.upper())
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    return logging.getLogger("train")
+from neko.logging import setup_logging
 
 
 # --- Config --------------------------------------------------------------------
@@ -505,7 +460,7 @@ async def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 setattr(cfg, k if k not in ("local", "remote", "cache", "output") else k, v)
 
-    log = setup_logging(cfg.loglevel, cfg.log_format)
+    log = setup_logging(cfg.loglevel, cfg.log_format, name="train")
     errs = cfg.validate()
     if errs:
         for e in errs:
