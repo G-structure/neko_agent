@@ -40,6 +40,7 @@ from typing import Dict, Any, Tuple, Optional, Set
 
 import requests
 import websockets
+from neko.logging import setup_logging
 
 # aiortc for SDP/ICE handshake (no media consumption)
 from aiortc import (
@@ -54,24 +55,12 @@ from aiortc.sdp import candidate_from_sdp
 # ---
 # Configure Logging
 # ---
-log_file = os.environ.get("NEKO_LOGFILE")
-if log_file:
-    logging.basicConfig(
-        level=os.environ.get("NEKO_LOGLEVEL", "INFO"),
-        format='[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s',
-        datefmt='%H:%M:%S',
-        filename=log_file,
-        filemode='a'
-    )
-else:
-    logging.basicConfig(
-        level=os.environ.get("NEKO_LOGLEVEL", "INFO"),
-        format='[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s',
-        datefmt='%H:%M:%S'
-    )
-logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("aiortc").setLevel(logging.WARNING)
-logger = logging.getLogger("neko_manual")
+logger = setup_logging(
+    os.environ.get("NEKO_LOGLEVEL", "INFO"),
+    os.environ.get("NEKO_LOG_FORMAT", "text"),
+    os.environ.get("NEKO_LOGFILE"),
+    name="neko_manual",
+)
 
 
 # ---

@@ -72,6 +72,8 @@ from aiortc import (
 )
 from aiortc.sdp import candidate_from_sdp
 
+from neko.logging import setup_logging
+
 
 # ----------------------
 # Resampling helpers
@@ -189,44 +191,6 @@ class Settings:
 # ----------------------
 # Logging
 # ----------------------
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON string.
-        
-        :param record: Log record to format
-        :return: JSON formatted log string
-        """
-        d = {
-            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
-            "lvl": record.levelname,
-            "msg": record.getMessage(),
-            "logger": record.name,
-        }
-        if record.exc_info:
-            d["exc"] = self.formatException(record.exc_info)
-        return json.dumps(d, ensure_ascii=False)
-
-
-def setup_logging(settings: Settings) -> logging.Logger:
-    """Configure application logging based on settings.
-    
-    :param settings: Application settings containing log level and format
-    :return: Configured logger instance for the yap module
-    """
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    h = logging.StreamHandler()
-    h.setFormatter(_JsonFormatter() if settings.log_format == "json" else logging.Formatter(
-        "[%(asctime)s] %(name)s %(levelname)s - %(message)s", "%H:%M:%S"
-    ))
-    root.addHandler(h)
-    root.setLevel(settings.log_level.upper())
-    # quiet noisy libs
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    logging.getLogger("aioice").setLevel(logging.WARNING)
-    return logging.getLogger("yap")
 
 
 # ----------------------
@@ -1511,7 +1475,7 @@ async def main_async(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     global settings  # only for CLI build_settings; not used in pipeline anymore
     settings = build_settings(args)
-    logger = setup_logging(settings)
+    logger = setup_logging(settings.log_level, settings.log_format, name="yap")
 
     if args.healthcheck:
         errs = settings.validate()

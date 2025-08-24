@@ -67,6 +67,8 @@ from aiortc import (
 )
 from aiortc.sdp import candidate_from_sdp
 
+from neko.logging import setup_logging
+
 # Fail fast on truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = False
 
@@ -214,106 +216,6 @@ class Settings:
         return errors
 
 # ----------------------
-# Logging Setup Functions
-# ----------------------
-def setup_logging(settings: Settings) -> logging.Logger:
-    """Configure logging based on settings.
-
-    Sets up both console and optional file logging with format determined by
-    the log_format setting. Clears any existing handlers and configures
-    new ones with appropriate formatters.
-
-    :param settings: Configuration settings containing log format, level, and file path
-    :type settings: Settings
-    :return: Configured logger instance
-    :rtype: logging.Logger
-    """
-    # Clear any existing handlers
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-
-    # Configure format based on settings
-    if settings.log_format == "json":
-        formatter = JsonFormatter()
-    else:
-        formatter = logging.Formatter(
-            '[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s',
-            datefmt='%H:%M:%S'
-        )
-
-    # Setup console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
-    root_logger.setLevel(settings.log_level.upper())
-
-    # Setup file handler if specified
-    if settings.log_file:
-        try:
-            file_handler = logging.FileHandler(settings.log_file)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
-        except Exception as e:
-            print(f"Failed to set up file logging to {settings.log_file}: {e}", file=sys.stderr)
-
-    # Configure third-party logger levels
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    logging.getLogger("aioice").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.ERROR)
-
-    logger = logging.getLogger("neko_agent")
-
-    # Log frame/click saving configuration if enabled
-    if settings.frame_save_path:
-        logger.info("Frame saving enabled: %s", settings.frame_save_path)
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(settings.frame_save_path) or '/tmp/neko-agent', exist_ok=True)
-
-    if settings.click_save_path:
-        logger.info("Click action saving enabled: %s", settings.click_save_path)
-        # Ensure directory exists
-        dir_path = settings.click_save_path if os.path.isdir(settings.click_save_path) else os.path.dirname(settings.click_save_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-        else:
-            os.makedirs('/tmp/neko-agent', exist_ok=True)
-
-    return logger
-
-class JsonFormatter(logging.Formatter):
-    """JSON formatter for structured logging."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON string.
-
-        :param record: Log record to format
-        :type record: logging.LogRecord
-        :return: JSON formatted log string
-        :rtype: str
-        """
-        log_entry = {
-            'timestamp': self.formatTime(record, self.datefmt),
-            'level': record.levelname,
-            'logger': record.name,
-            'message': record.getMessage(),
-        }
-
-        # Add exception info if present
-        if record.exc_info:
-            log_entry['exception'] = self.formatException(record.exc_info)
-
-        # Add extra fields
-        for key, value in record.__dict__.items():
-            if key not in ('name', 'msg', 'args', 'levelname', 'levelno', 'pathname', 'filename',
-                          'module', 'exc_info', 'exc_text', 'stack_info', 'lineno', 'funcName',
-                          'created', 'msecs', 'relativeCreated', 'thread', 'threadName',
-                          'processName', 'process', 'getMessage', 'message'):
-                log_entry[key] = value
-
-        return json.dumps(log_entry)
-
 # ----------------------
 # Metrics
 # ----------------------
@@ -2603,7 +2505,28 @@ async def main() -> None:
             sys.exit(0)
 
     # Setup logging
-    logger = setup_logging(settings)
+    logger = setup_logging(
+        settings.log_level, settings.log_format, settings.log_file, name="neko_agent"
+    )
+
+    if settings.frame_save_path:
+        logger.info("Frame saving enabled: %s", settings.frame_save_path)
+        os.makedirs(
+            os.path.dirname(settings.frame_save_path) or "/tmp/neko-agent",
+            exist_ok=True,
+        )
+
+    if settings.click_save_path:
+        logger.info("Click action saving enabled: %s", settings.click_save_path)
+        dir_path = (
+            settings.click_save_path
+            if os.path.isdir(settings.click_save_path)
+            else os.path.dirname(settings.click_save_path)
+        )
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        else:
+            os.makedirs("/tmp/neko-agent", exist_ok=True)
 
     # Override log level if specified via CLI
     if args.loglevel:
