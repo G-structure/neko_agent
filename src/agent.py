@@ -35,22 +35,19 @@ import json
 import time
 import base64
 import signal
-import random
 import uuid
 import tempfile
 import asyncio
 import logging
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Tuple, Set
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from typing import Any, Dict, List, Optional, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 # --- third-party
 import torch
 import requests
-import websockets
 from PIL import Image, ImageFile, ImageDraw, ImageFont
 from prometheus_client import start_http_server, Counter, Histogram
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
@@ -66,6 +63,9 @@ from aiortc import (
     MediaStreamError,  # clean end-of-stream signal
 )
 from aiortc.sdp import candidate_from_sdp
+
+from neko.logging import setup_logging
+from neko.websocket import Signaler
 
 # Fail fast on truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = False
@@ -214,106 +214,6 @@ class Settings:
         return errors
 
 # ----------------------
-# Logging Setup Functions
-# ----------------------
-def setup_logging(settings: Settings) -> logging.Logger:
-    """Configure logging based on settings.
-
-    Sets up both console and optional file logging with format determined by
-    the log_format setting. Clears any existing handlers and configures
-    new ones with appropriate formatters.
-
-    :param settings: Configuration settings containing log format, level, and file path
-    :type settings: Settings
-    :return: Configured logger instance
-    :rtype: logging.Logger
-    """
-    # Clear any existing handlers
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-
-    # Configure format based on settings
-    if settings.log_format == "json":
-        formatter = JsonFormatter()
-    else:
-        formatter = logging.Formatter(
-            '[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s',
-            datefmt='%H:%M:%S'
-        )
-
-    # Setup console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
-    root_logger.setLevel(settings.log_level.upper())
-
-    # Setup file handler if specified
-    if settings.log_file:
-        try:
-            file_handler = logging.FileHandler(settings.log_file)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
-        except Exception as e:
-            print(f"Failed to set up file logging to {settings.log_file}: {e}", file=sys.stderr)
-
-    # Configure third-party logger levels
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    logging.getLogger("aioice").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.ERROR)
-
-    logger = logging.getLogger("neko_agent")
-
-    # Log frame/click saving configuration if enabled
-    if settings.frame_save_path:
-        logger.info("Frame saving enabled: %s", settings.frame_save_path)
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(settings.frame_save_path) or '/tmp/neko-agent', exist_ok=True)
-
-    if settings.click_save_path:
-        logger.info("Click action saving enabled: %s", settings.click_save_path)
-        # Ensure directory exists
-        dir_path = settings.click_save_path if os.path.isdir(settings.click_save_path) else os.path.dirname(settings.click_save_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-        else:
-            os.makedirs('/tmp/neko-agent', exist_ok=True)
-
-    return logger
-
-class JsonFormatter(logging.Formatter):
-    """JSON formatter for structured logging."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON string.
-
-        :param record: Log record to format
-        :type record: logging.LogRecord
-        :return: JSON formatted log string
-        :rtype: str
-        """
-        log_entry = {
-            'timestamp': self.formatTime(record, self.datefmt),
-            'level': record.levelname,
-            'logger': record.name,
-            'message': record.getMessage(),
-        }
-
-        # Add exception info if present
-        if record.exc_info:
-            log_entry['exception'] = self.formatException(record.exc_info)
-
-        # Add extra fields
-        for key, value in record.__dict__.items():
-            if key not in ('name', 'msg', 'args', 'levelname', 'levelno', 'pathname', 'filename',
-                          'module', 'exc_info', 'exc_text', 'stack_info', 'lineno', 'funcName',
-                          'created', 'msecs', 'relativeCreated', 'thread', 'threadName',
-                          'processName', 'process', 'getMessage', 'message'):
-                log_entry[key] = value
-
-        return json.dumps(log_entry)
-
 # ----------------------
 # Metrics
 # ----------------------
@@ -684,266 +584,6 @@ def safe_parse_action(output_text: str, nav_mode: str="web", logger: Optional[lo
             logger.error("Schema validation error: %s | Parsed=%r", e, act)
         parse_errors.inc()
         return None
-
-# ----------------------
-# Event bus + WS Signaler
-# ----------------------
-class LatestOnly:
-    """A simple async container that holds only the latest value set.
-
-    This class provides a mechanism to await new values while discarding
-    older values. Only the most recent value is kept, making it useful
-    for scenarios where only the latest data is relevant.
-    """
-
-    def __init__(self):
-        """Initialize the LatestOnly container with no value set."""
-        self._val = None
-        self._event = asyncio.Event()
-
-    def set(self, v):
-        """Set a new value and notify any waiting consumers.
-
-        :param v: The new value to store.
-        :type v: Any
-        :return: None
-        :rtype: None
-        """
-        self._val = v
-        self._event.set()
-
-    async def get(self):
-        """Wait for and return the latest value, then clear the event.
-
-        :return: The most recently set value.
-        :rtype: Any
-        """
-        await self._event.wait()
-        self._event.clear()
-        return self._val
-
-class Broker:
-    """Message broker for routing WebSocket events to topic-based queues.
-
-    This class manages the distribution of incoming messages to appropriate
-    topic queues based on event types. It supports both queueing and latest-only
-    delivery patterns for different types of messages.
-    """
-
-    def __init__(self):
-        """Initialize the broker with empty topic collections."""
-        self.queues: Dict[str, asyncio.Queue] = {}
-        self.latest: Dict[str, LatestOnly] = {}
-        self.waiters: Dict[str, asyncio.Future] = {}
-
-    def topic_queue(self, topic: str, maxsize: int = 512) -> asyncio.Queue:
-        """Get or create a queue for the specified topic.
-
-        :param topic: The topic name for the queue.
-        :type topic: str
-        :param maxsize: Maximum queue size. Defaults to 512.
-        :type maxsize: int
-        :return: The asyncio Queue for the topic.
-        :rtype: asyncio.Queue
-        """
-        if topic not in self.queues:
-            self.queues[topic] = asyncio.Queue(maxsize=maxsize)
-        return self.queues[topic]
-
-    def topic_latest(self, topic: str) -> LatestOnly:
-        """Get or create a LatestOnly container for the specified topic.
-
-        :param topic: The topic name for the container.
-        :type topic: str
-        :return: The LatestOnly container for the topic.
-        :rtype: LatestOnly
-        """
-        if topic not in self.latest:
-            self.latest[topic] = LatestOnly()
-        return self.latest[topic]
-
-    def publish(self, msg: Dict[str, Any]) -> None:
-        """Route an incoming message to the appropriate topic queue or container.
-
-        Messages are routed based on their 'event' field prefix. Special handling
-        is provided for reply messages, signal events, system events, chat events,
-        and send channel events.
-
-        :param msg: The message dictionary to route, expected to have an 'event' key.
-        :type msg: Dict[str, Any]
-        :return: None
-        :rtype: None
-        """
-        ev = msg.get("event","")
-        if (rid := msg.get("reply_to")) and (fut := self.waiters.pop(rid, None)):
-            if not fut.done():
-                fut.set_result(msg)
-            return
-        if ev.startswith("signal/"):
-            if ev == "signal/video":
-                self.topic_latest("video").set(msg)
-            elif ev == "signal/candidate":
-                self.topic_queue("ice").put_nowait(msg)
-            elif ev in {"signal/offer","signal/provide","signal/answer","signal/close"}:
-                self.topic_queue("control").put_nowait(msg)
-            else:
-                self.topic_queue("signal").put_nowait(msg)
-        elif ev.startswith(("system/","control/","screen/","keyboard/","session/","error/")):
-            self.topic_queue("system").put_nowait(msg)
-        elif ev.startswith("chat/"):
-            self.topic_queue("chat").put_nowait(msg)
-        elif ev.startswith("send/"):
-            # Treat opaque send channel messages as chat-like for task intake.
-            self.topic_queue("chat").put_nowait(msg)
-        else:
-            self.topic_queue("misc").put_nowait(msg)
-
-class Signaler:
-    """WebSocket client for handling signaling and messaging with automatic reconnection.
-
-    This class manages a WebSocket connection with built-in reconnection logic,
-    message routing through a Broker, and separate read/send loops for handling
-    bidirectional communication.
-    """
-
-    def __init__(self, url: str, **wsopts):
-        """Initialize the WebSocket signaler.
-
-        :param url: WebSocket URL to connect to
-        :type url: str
-        :param wsopts: Additional WebSocket connection options
-        :type wsopts: Any
-        """
-        self.url = url
-        self.wsopts = dict(
-            ping_interval=30,
-            ping_timeout=60,
-            max_queue=1024,
-            max_size=10_000_000,
-            **wsopts
-        )
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._tasks: Set[asyncio.Task] = set()
-        self._sendq: asyncio.Queue = asyncio.Queue(maxsize=256)
-        self.broker = Broker()
-        self._closed = asyncio.Event()
-
-    async def connect_with_backoff(self):
-        """Establish WebSocket connection with exponential backoff retry.
-
-        This method attempts to connect to the WebSocket URL with increasing
-        delays between retry attempts. Once connected, it starts the read and
-        send loops as background tasks.
-
-        :return: Self for method chaining.
-        :rtype: Signaler
-        """
-        backoff = 1
-        while not self._closed.is_set():
-            try:
-                self.ws = await websockets.connect(self.url, **self.wsopts)
-                try:
-                    parsed = urlparse(self.url)
-                    qs = parse_qs(parsed.query)
-                    if "token" in qs:
-                        qs["token"] = ["***"]
-                    safe_q = urlencode(qs, doseq=True)
-                    safe_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, safe_q, parsed.fragment))
-                except Exception:
-                    safe_url = self.url
-                logger.info("WebSocket connected: %s", safe_url)
-                self._tasks.add(asyncio.create_task(self._read_loop(), name="ws-read"))
-                self._tasks.add(asyncio.create_task(self._send_loop(), name="ws-send"))
-                self._closed.clear()
-                return self
-            except Exception as e:
-                jitter = random.uniform(0, max(0.25, backoff * 0.25))
-                delay = min(backoff + jitter, 30)
-                logger.error("WS connect error: %s - retrying in %.2fs", e, delay)
-                await asyncio.sleep(delay)
-                backoff = min(backoff * 2, 30)
-
-    async def close(self):
-        """Close the WebSocket connection and clean up resources.
-
-        This method cancels all running tasks, closes the WebSocket connection,
-        and waits for proper cleanup.
-
-        :return: None
-        :rtype: None
-        """
-        self._closed.set()
-        for t in list(self._tasks):
-            if not t.done():
-                t.cancel()
-        self._tasks.clear()
-        if self.ws:
-            try:
-                await self.ws.close()
-                if hasattr(self.ws, "wait_closed"):
-                    await self.ws.wait_closed()
-            except Exception:
-                pass
-            finally:
-                self.ws = None
-
-    async def _read_loop(self):
-        """Background task that reads messages from WebSocket and routes them.
-
-        This coroutine continuously reads messages from the WebSocket connection
-        and forwards them to the broker for routing to appropriate topic queues.
-        It handles connection closure and cancellation gracefully.
-
-        :return: None
-        :rtype: None
-        """
-        try:
-            async for raw in self.ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    logger.debug("Received non-JSON: %r", raw)
-                    continue
-                self.broker.publish(msg)
-        except (websockets.ConnectionClosedError, websockets.ConnectionClosedOK) as e:
-            logger.warning("WS closed: %s", e)
-        except asyncio.CancelledError:
-            logger.info("WS read loop cancelled")
-        finally:
-            self._closed.set()
-
-    async def _send_loop(self):
-        """Background task that sends queued messages to the WebSocket.
-
-        This coroutine continuously processes messages from the send queue and
-        transmits them over the WebSocket connection. It handles connection
-        closure and cancellation gracefully.
-
-        :return: None
-        :rtype: None
-        """
-        try:
-            while not self._closed.is_set():
-                msg = await self._sendq.get()
-                try:
-                    await self.ws.send(json.dumps(msg))
-                except websockets.ConnectionClosed:
-                    logger.warning("Send failed: WS closed - exiting send loop.")
-                    break
-        except asyncio.CancelledError:
-            logger.info("WS send loop cancelled")
-        finally:
-            self._closed.set()
-
-    async def send(self, msg: Dict[str, Any]) -> None:
-        """Queue a message for sending over the WebSocket.
-
-        :param msg: The message dictionary to send.
-        :type msg: Dict[str, Any]
-        :return: None
-        :rtype: None
-        """
-        await self._sendq.put(msg)
 
 # ----------------------
 # Frame Sources
@@ -2603,7 +2243,28 @@ async def main() -> None:
             sys.exit(0)
 
     # Setup logging
-    logger = setup_logging(settings)
+    logger = setup_logging(
+        settings.log_level, settings.log_format, settings.log_file, name="neko_agent"
+    )
+
+    if settings.frame_save_path:
+        logger.info("Frame saving enabled: %s", settings.frame_save_path)
+        os.makedirs(
+            os.path.dirname(settings.frame_save_path) or "/tmp/neko-agent",
+            exist_ok=True,
+        )
+
+    if settings.click_save_path:
+        logger.info("Click action saving enabled: %s", settings.click_save_path)
+        dir_path = (
+            settings.click_save_path
+            if os.path.isdir(settings.click_save_path)
+            else os.path.dirname(settings.click_save_path)
+        )
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        else:
+            os.makedirs("/tmp/neko-agent", exist_ok=True)
 
     # Override log level if specified via CLI
     if args.loglevel:

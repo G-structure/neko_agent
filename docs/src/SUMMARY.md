@@ -34,3 +34,4 @@
 # Reference
 
 - [Glossary](./reference/glossary.md)
+- [Library API](./reference/library.md)

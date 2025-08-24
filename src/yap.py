@@ -54,7 +54,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # third-party
 import numpy as np
-import websockets
 
 try:
     import av  # PyAV
@@ -71,6 +70,9 @@ from aiortc import (
     MediaStreamTrack,
 )
 from aiortc.sdp import candidate_from_sdp
+
+from neko.logging import setup_logging
+from neko.websocket import Signaler
 
 
 # ----------------------
@@ -189,207 +191,6 @@ class Settings:
 # ----------------------
 # Logging
 # ----------------------
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON string.
-        
-        :param record: Log record to format
-        :return: JSON formatted log string
-        """
-        d = {
-            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
-            "lvl": record.levelname,
-            "msg": record.getMessage(),
-            "logger": record.name,
-        }
-        if record.exc_info:
-            d["exc"] = self.formatException(record.exc_info)
-        return json.dumps(d, ensure_ascii=False)
-
-
-def setup_logging(settings: Settings) -> logging.Logger:
-    """Configure application logging based on settings.
-    
-    :param settings: Application settings containing log level and format
-    :return: Configured logger instance for the yap module
-    """
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    h = logging.StreamHandler()
-    h.setFormatter(_JsonFormatter() if settings.log_format == "json" else logging.Formatter(
-        "[%(asctime)s] %(name)s %(levelname)s - %(message)s", "%H:%M:%S"
-    ))
-    root.addHandler(h)
-    root.setLevel(settings.log_level.upper())
-    # quiet noisy libs
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    logging.getLogger("aioice").setLevel(logging.WARNING)
-    return logging.getLogger("yap")
-
-
-# ----------------------
-# WS Broker / Signaler
-# ----------------------
-class LatestOnly:
-    def __init__(self) -> None:
-        """Initialize LatestOnly with empty value and event."""
-        self._val = None
-        self._ev = asyncio.Event()
-
-    def set(self, v):
-        """Set a new value and notify waiting coroutines.
-        
-        :param v: Value to set
-        """
-        self._val = v
-        self._ev.set()
-
-    async def get(self):
-        """Wait for and return the latest value.
-        
-        :return: The most recently set value
-        """
-        await self._ev.wait()
-        self._ev.clear()
-        return self._val
-
-
-class Broker:
-    def __init__(self) -> None:
-        """Initialize broker with empty topic containers."""
-        self.queues: Dict[str, asyncio.Queue] = {}
-        self.latest: Dict[str, LatestOnly] = {}
-        self.waiters: Dict[str, asyncio.Future] = {}
-
-    def topic_queue(self, name: str, maxsize: int = 512) -> asyncio.Queue:
-        """Get or create a queue for a specific topic.
-        
-        :param name: Topic name
-        :param maxsize: Maximum queue size
-        :return: Queue instance for the topic
-        """
-        if name not in self.queues:
-            self.queues[name] = asyncio.Queue(maxsize=maxsize)
-        return self.queues[name]
-
-    def topic_latest(self, name: str) -> LatestOnly:
-        """Get or create a LatestOnly instance for a specific topic.
-        
-        :param name: Topic name
-        :return: LatestOnly instance for the topic
-        """
-        if name not in self.latest:
-            self.latest[name] = LatestOnly()
-        return self.latest[name]
-
-    def publish(self, msg: Dict[str, Any]) -> None:
-        """Route incoming messages to appropriate topic queues.
-        
-        :param msg: Message dictionary containing event and payload data
-        """
-        ev = msg.get("event", "")
-        if (rid := msg.get("reply_to")) and (fut := self.waiters.pop(rid, None)):
-            if not fut.done():
-                fut.set_result(msg)
-            return
-        if ev.startswith("signal/"):
-            if ev in ("signal/offer", "signal/provide", "signal/answer", "signal/close"):
-                self.topic_queue("control").put_nowait(msg)
-            elif ev == "signal/candidate":
-                self.topic_queue("ice").put_nowait(msg)
-            elif ev == "signal/video":
-                self.topic_latest("video").set(msg)
-            else:
-                self.topic_queue("signal").put_nowait(msg)
-        elif ev.startswith("chat/") or ev.startswith("send/"):
-            self.topic_queue("chat").put_nowait(msg)
-        elif ev.startswith("system/"):
-            self.topic_queue("system").put_nowait(msg)
-        else:
-            self.topic_queue("misc").put_nowait(msg)
-
-
-class Signaler:
-    def __init__(self, url: str):
-        """Initialize signaler with WebSocket URL.
-        
-        :param url: WebSocket URL to connect to
-        """
-        self.url = url
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
-        self.broker = Broker()
-        self._sendq: asyncio.Queue = asyncio.Queue(maxsize=256)
-        self._closed = asyncio.Event()
-        self._tasks: List[asyncio.Task] = []
-
-    async def connect(self):
-        """Establish WebSocket connection with exponential backoff retry."""
-        backoff = 1.0
-        while not self._closed.is_set():
-            try:
-                self.ws = await websockets.connect(
-                    self.url, ping_interval=30, ping_timeout=60, max_size=10_000_000
-                )
-                logging.getLogger("yap").info("WS connected")
-                self._tasks.append(asyncio.create_task(self._read_loop(), name="ws-read"))
-                self._tasks.append(asyncio.create_task(self._send_loop(), name="ws-send"))
-                return
-            except Exception as e:
-                logging.getLogger("yap").error("WS connect error: %s (retry in %.1fs)", e, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(30.0, backoff * 1.6)
-
-    async def close(self):
-        """Close WebSocket connection and clean up resources."""
-        self._closed.set()
-        for t in list(self._tasks):
-            t.cancel()
-        self._tasks.clear()
-        if self.ws:
-            with contextlib.suppress(Exception):
-                await self.ws.close()
-                if hasattr(self.ws, "wait_closed"):
-                    await self.ws.wait_closed()
-            self.ws = None
-
-    async def _read_loop(self):
-        """Background task to read messages from WebSocket."""
-        try:
-            async for raw in self.ws:
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    continue
-                self.broker.publish(msg)
-        except Exception as e:
-            logging.getLogger("yap").warning("WS reader ended: %s", e)
-        finally:
-            self._closed.set()
-
-    async def _send_loop(self):
-        """Background task to send queued messages through WebSocket."""
-        try:
-            while not self._closed.is_set():
-                msg = await self._sendq.get()
-                if not self.ws:
-                    break
-                try:
-                    await self.ws.send(json.dumps(msg))
-                except Exception:
-                    break
-        except asyncio.CancelledError:
-            pass
-        finally:
-            self._closed.set()
-
-    async def send(self, msg: Dict[str, Any]) -> None:
-        """Send a message through the WebSocket connection.
-        
-        :param msg: Message dictionary to send
-        """
-        await self._sendq.put(msg)
 
 
 # ----------------------
@@ -1160,7 +961,7 @@ class YapApp:
 
         ws_url = await self._login_if_needed()
         self.signaler = Signaler(ws_url)
-        await self.signaler.connect()
+        await self.signaler.connect_with_backoff()
 
         # Request media (audio send on, video disabled)
         await self.signaler.send({"event": "signal/request", "payload": {"video": {"disabled": True}, "audio": {"disabled": False}}})
@@ -1511,7 +1312,7 @@ async def main_async(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     global settings  # only for CLI build_settings; not used in pipeline anymore
     settings = build_settings(args)
-    logger = setup_logging(settings)
+    logger = setup_logging(settings.log_level, settings.log_format, name="yap")
 
     if args.healthcheck:
         errs = settings.validate()

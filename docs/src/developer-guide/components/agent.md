@@ -1,6 +1,6 @@
 # Core Agent (`src/agent.py`)
 
-The core agent (`src/agent.py`) is the main automation engine of the Neko Agent system. It provides AI-powered GUI automation through WebRTC connections to Neko servers, using the ShowUI-2B vision model for intelligent action planning and execution.
+The core agent (`src/agent.py`) is the main automation engine of the Neko Agent system. It provides AI-powered GUI automation through WebRTC connections to Neko servers, using the ShowUI-2B vision model for intelligent action planning and execution.  It leverages the shared `neko` package (`neko.config`, `neko.logging`, `neko.websocket`) to centralize configuration, logging, and WebSocket signaling.
 
 ## Overview
 
@@ -221,7 +221,7 @@ The agent supports multiple frame capture mechanisms:
 
 ### 4. Signaler
 
-**Purpose**: WebSocket communication layer for control and signaling.
+**Purpose**: WebSocket communication layer for control and signaling provided by `neko.websocket.Signaler`.
 
 **Features**:
 - **Event-driven messaging** - Pub/sub pattern with topic routing
