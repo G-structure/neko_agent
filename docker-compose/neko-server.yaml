@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   neko-chrome:
@@ -29,4 +29,4 @@ services:
       test: ["CMD", "curl", "-f", "http://100.98.199.38:8080"]
       interval: 10s
       retries: 5
-      timeout: 5s
+      timeout: 5
