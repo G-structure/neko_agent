@@ -23,6 +23,7 @@
         (import ./overlays/bitsandbytes.nix)
         (import ./overlays/f5-tts.nix)
         (import ./overlays/znver2-flags.nix)   # provides pkgs.nekoZnver2Env
+        (import ./overlays/vmm-cli.nix)        # provides pkgs.vmm-cli
         ml-pkgs.overlays.torch-family
       ];
 
@@ -280,6 +281,52 @@ PY
               echo "  mdbook test           - Test documentation"
               echo ""
               ${npmAITools}
+            '';
+          };
+
+          tee = pkgs.mkShell {
+            buildInputs = commonSystemPackages ++ [
+              pkgs.nodejs_20
+              pkgs.nodePackages.npm
+              pkgs.docker
+              pkgs.docker-compose
+              pkgs.bun
+              pkgs.vmm-cli
+            ];
+            shellHook = ''
+              ${loadDotenv}
+              echo "🔐 TEE Development Environment"
+              echo "Tools available:"
+              echo "  - Phala Cloud CLI (phala)"
+              echo "  - Legacy VMM CLI (vmm-cli)"
+              echo "  - Docker & Docker Compose"
+              echo "  - Bun runtime"
+              echo ""
+              
+              # Setup Phala CLI
+              export NPM_CONFIG_PREFIX=$PWD/.npm-global
+              export PATH=$NPM_CONFIG_PREFIX/bin:$PATH
+              
+              if [ ! -x "$NPM_CONFIG_PREFIX/bin/phala" ]; then
+                echo "Installing Phala Cloud CLI..."
+                npm install -g phala
+              fi
+              
+              echo "Phala CLI version: $(phala --version 2>/dev/null || echo 'Installing...')"
+              echo "Legacy VMM CLI: $(vmm-cli --version 2>/dev/null || echo 'Available')"
+              echo ""
+              echo "Quick start (Modern CLI):"
+              echo "  phala auth login <your-api-key>    - Login to Phala Cloud"
+              echo "  phala status                       - Check authentication status"
+              echo "  phala cvms list                    - List your CVMs"
+              echo "  phala nodes                        - List available TEE nodes"
+              echo ""
+              echo "Quick start (Legacy VMM CLI):"
+              echo "  export DSTACK_VMM_URL=https://web.h200-dstack-01.phala.network:40081/"
+              echo "  vmm-cli lsvm                       - List virtual machines"
+              echo "  vmm-cli lsimage                    - List available images"
+              echo "  vmm-cli lsgpu                      - List available GPUs"
+              echo ""
             '';
           };
         }
