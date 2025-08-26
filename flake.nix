@@ -386,6 +386,28 @@ PY
             exec ${pyEnvOpt}/bin/python ${./src/agent.py} "$@"
           '';
 
+          # Additional runners for other scripts
+          captureRunnerGeneric = pkgs.writeShellScriptBin "neko-capture" ''
+            exec ${pyEnvGeneric}/bin/python ${./src/capture.py} "$@"
+          '';
+          captureRunnerOpt = pkgs.writeShellScriptBin "neko-capture" ''
+            exec ${pyEnvOpt}/bin/python ${./src/capture.py} "$@"
+          '';
+
+          yapRunnerGeneric = pkgs.writeShellScriptBin "neko-yap" ''
+            exec ${pyEnvGeneric}/bin/python ${./src/yap.py} "$@"
+          '';
+          yapRunnerOpt = pkgs.writeShellScriptBin "neko-yap" ''
+            exec ${pyEnvOpt}/bin/python ${./src/yap.py} "$@"
+          '';
+
+          trainRunnerGeneric = pkgs.writeShellScriptBin "neko-train" ''
+            exec ${pyEnvGeneric}/bin/python ${./src/train.py} "$@"
+          '';
+          trainRunnerOpt = pkgs.writeShellScriptBin "neko-train" ''
+            exec ${pyEnvOpt}/bin/python ${./src/train.py} "$@"
+          '';
+
           baseEnv = [
             "PYTHONUNBUFFERED=1"
             "NEKO_LOGLEVEL=INFO"
@@ -448,9 +470,156 @@ PY
               Entrypoint = [ "/bin/neko-agent" ];
             };
           };
+
+          # Capture images
+          neko-capture-docker-generic = pkgs.dockerTools.buildImage {
+            name = "neko-capture:cuda12.8-generic";
+            created = "now";
+            copyToRoot = mkRoot ([
+              captureRunnerGeneric
+              pyEnvGeneric
+              cuda.cudatoolkit
+              cuda.cudnn
+              cuda.nccl
+              pkgs.bashInteractive
+            ] ++ mkCommonSystemPackages pkgs);
+            config = {
+              Env = baseEnv ++ [
+                "CUDA_HOME=${cuda.cudatoolkit}"
+                "LD_LIBRARY_PATH=${cuda.cudatoolkit}/lib64:${cuda.cudnn}/lib"
+                "CUDA_MODULE_LOADING=LAZY"
+                "TORCH_CUDA_ARCH_LIST=8.6+PTX"
+              ];
+              WorkingDir = "/workspace";
+              Entrypoint = [ "/bin/neko-capture" ];
+            };
+          };
+
+          neko-capture-docker-opt = pkgs.dockerTools.buildImage {
+            name = "neko-capture:cuda12.8-sm86-v3";
+            created = "now";
+            copyToRoot = mkRoot ([
+              captureRunnerOpt
+              pyEnvOpt
+              cuda.cudatoolkit
+              cuda.cudnn cuda.nccl
+              pkgs.bashInteractive
+              (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
+            ] ++ mkCommonSystemPackages pkgs);
+            config = {
+              Env = baseEnv ++ [
+                "CUDA_HOME=${cuda.cudatoolkit}"
+                "LD_LIBRARY_PATH=${cuda.cudatoolkit}/lib64:${cuda.cudnn}/lib"
+                "CUDA_MODULE_LOADING=LAZY"
+                "TORCH_CUDA_ARCH_LIST=8.6"
+                "NIX_CFLAGS_COMPILE=-O3 -pipe -march=znver2 -mtune=znver2 -fno-plt"
+                "RUSTFLAGS=-C target-cpu=znver2 -C target-feature=+sse2,+sse4.2,+avx,+avx2,+fma,+bmi1,+bmi2 -C link-arg=-Wl,-O1 -C link-arg=--as-needed"
+              ];
+              WorkingDir = "/workspace";
+              Entrypoint = [ "/bin/neko-capture" ];
+            };
+          };
+
+          # Yap images
+          neko-yap-docker-generic = pkgs.dockerTools.buildImage {
+            name = "neko-yap:cuda12.8-generic";
+            created = "now";
+            copyToRoot = mkRoot ([
+              yapRunnerGeneric
+              pyEnvGeneric
+              cuda.cudatoolkit
+              cuda.cudnn
+              cuda.nccl
+              pkgs.bashInteractive
+            ] ++ mkCommonSystemPackages pkgs);
+            config = {
+              Env = baseEnv ++ [
+                "CUDA_HOME=${cuda.cudatoolkit}"
+                "LD_LIBRARY_PATH=${cuda.cudatoolkit}/lib64:${cuda.cudnn}/lib"
+                "CUDA_MODULE_LOADING=LAZY"
+                "TORCH_CUDA_ARCH_LIST=8.6+PTX"
+              ];
+              WorkingDir = "/workspace";
+              Entrypoint = [ "/bin/neko-yap" ];
+            };
+          };
+
+          neko-yap-docker-opt = pkgs.dockerTools.buildImage {
+            name = "neko-yap:cuda12.8-sm86-v3";
+            created = "now";
+            copyToRoot = mkRoot ([
+              yapRunnerOpt
+              pyEnvOpt
+              cuda.cudatoolkit
+              cuda.cudnn cuda.nccl
+              pkgs.bashInteractive
+              (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
+            ] ++ mkCommonSystemPackages pkgs);
+            config = {
+              Env = baseEnv ++ [
+                "CUDA_HOME=${cuda.cudatoolkit}"
+                "LD_LIBRARY_PATH=${cuda.cudatoolkit}/lib64:${cuda.cudnn}/lib"
+                "CUDA_MODULE_LOADING=LAZY"
+                "TORCH_CUDA_ARCH_LIST=8.6"
+                "NIX_CFLAGS_COMPILE=-O3 -pipe -march=znver2 -mtune=znver2 -fno-plt"
+                "RUSTFLAGS=-C target-cpu=znver2 -C target-feature=+sse2,+sse4.2,+avx,+avx2,+fma,+bmi1,+bmi2 -C link-arg=-Wl,-O1 -C link-arg=--as-needed"
+              ];
+              WorkingDir = "/workspace";
+              Entrypoint = [ "/bin/neko-yap" ];
+            };
+          };
+
+          # Train images
+          neko-train-docker-generic = pkgs.dockerTools.buildImage {
+            name = "neko-train:cuda12.8-generic";
+            created = "now";
+            copyToRoot = mkRoot ([
+              trainRunnerGeneric
+              pyEnvGeneric
+              cuda.cudatoolkit
+              cuda.cudnn
+              cuda.nccl
+              pkgs.bashInteractive
+            ] ++ mkCommonSystemPackages pkgs);
+            config = {
+              Env = baseEnv ++ [
+                "CUDA_HOME=${cuda.cudatoolkit}"
+                "LD_LIBRARY_PATH=${cuda.cudatoolkit}/lib64:${cuda.cudnn}/lib"
+                "CUDA_MODULE_LOADING=LAZY"
+                "TORCH_CUDA_ARCH_LIST=8.6+PTX"
+              ];
+              WorkingDir = "/workspace";
+              Entrypoint = [ "/bin/neko-train" ];
+            };
+          };
+
+          neko-train-docker-opt = pkgs.dockerTools.buildImage {
+            name = "neko-train:cuda12.8-sm86-v3";
+            created = "now";
+            copyToRoot = mkRoot ([
+              trainRunnerOpt
+              pyEnvOpt
+              cuda.cudatoolkit
+              cuda.cudnn cuda.nccl
+              pkgs.bashInteractive
+              (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
+            ] ++ mkCommonSystemPackages pkgs);
+            config = {
+              Env = baseEnv ++ [
+                "CUDA_HOME=${cuda.cudatoolkit}"
+                "LD_LIBRARY_PATH=${cuda.cudatoolkit}/lib64:${cuda.cudnn}/lib"
+                "CUDA_MODULE_LOADING=LAZY"
+                "TORCH_CUDA_ARCH_LIST=8.6"
+                "NIX_CFLAGS_COMPILE=-O3 -pipe -march=znver2 -mtune=znver2 -fno-plt"
+                "RUSTFLAGS=-C target-cpu=znver2 -C target-feature=+sse2,+sse4.2,+avx,+avx2,+fma,+bmi1,+bmi2 -C link-arg=-Wl,-O1 -C link-arg=--as-needed"
+              ];
+              WorkingDir = "/workspace";
+              Entrypoint = [ "/bin/neko-train" ];
+            };
+          };
         };
 
-      # helper to build both images
+      # helper to build all images
       apps.x86_64-linux.build-images =
         let
           pkgs-app = import nixpkgs { system = "x86_64-linux"; };
@@ -459,9 +628,19 @@ PY
           type = "app";
           program = toString (pkgs-app.writeShellScript "build-images" ''
             set -euo pipefail
+            echo "Building agent images..."
             nix build .#neko-agent-docker-generic
             nix build .#neko-agent-docker-opt
-            echo "Images built."
+            echo "Building capture images..."
+            nix build .#neko-capture-docker-generic
+            nix build .#neko-capture-docker-opt
+            echo "Building yap images..."
+            nix build .#neko-yap-docker-generic
+            nix build .#neko-yap-docker-opt
+            echo "Building train images..."
+            nix build .#neko-train-docker-generic
+            nix build .#neko-train-docker-opt
+            echo "All images built successfully."
           '');
         };
 
