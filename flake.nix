@@ -13,7 +13,7 @@
       # Build metadata for reproducible builds and attestation
       buildInfo = rec {
         # Use flake lock for reproducible timestamps, convert to RFC3339 format
-        timestamp = if (self ? lastModifiedDate) 
+        timestamp = if (self ? lastModifiedDate)
           then let
             raw = self.lastModifiedDate;
             year = builtins.substring 0 4 raw;
@@ -24,17 +24,17 @@
             second = builtins.substring 12 2 raw;
           in "${year}-${month}-${day}T${hour}:${minute}:${second}Z"
           else "1970-01-01T00:00:00Z"; # Unix epoch as fallback
-        
+
         # Git information from flake
         revision = self.rev or self.dirtyRev or "unknown";
         shortRev = builtins.substring 0 8 revision;
-        
+
         # Nix metadata
         nixpkgsRev = nixpkgs.rev or "unknown";
-        
+
         # Version derivation
         version = if (self ? rev) then shortRev else "${shortRev}-dirty";
-        
+
         # Image metadata for attestation
         imageMetadata = {
           "org.opencontainers.image.title" = "Neko Agent";
@@ -81,15 +81,15 @@
       ];
 
       # Helper function to sort keys deterministically (matching dstack SDK)
-      sortKeys = obj: 
+      sortKeys = obj:
         if builtins.isAttrs obj then
           builtins.listToAttrs (
-            map (key: { name = key; value = sortKeys obj.${key}; }) 
+            map (key: { name = key; value = sortKeys obj.${key}; })
             (builtins.sort (a: b: a < b) (builtins.attrNames obj))
           )
         else if builtins.isList obj then
           map sortKeys obj
-        else 
+        else
           obj;
 
       # Dstack app-compose generator for reproducible deployments
@@ -105,27 +105,27 @@
           inherit name;
           runner = "docker-compose";
           docker_compose_file = dockerComposeContent;
-          
+
           # Security settings
           gateway_enabled = features.gateway or true;
           kms_enabled = features.kms or false;
           public_logs = features.publicLogs or false;
-          public_sysinfo = features.publicSysinfo or true; 
+          public_sysinfo = features.publicSysinfo or true;
           public_tcbinfo = features.publicTcbinfo or true;
           local_key_provider_enabled = features.localKeyProvider or false;
           no_instance_id = features.noInstanceId or false;
-          
+
           # Optional pre-launch script for attestation
           pre_launch_script = features.preLaunchScript or null;
         };
-        
+
         # Generate JSON with deterministic serialization
         composeJsonContent = builtins.toJSON appCompose;
         composeJson = pkgs.writeText "app-compose.json" composeJsonContent;
-        
+
         # Calculate compose hash using same algorithm as dstack SDK
         composeHash = builtins.hashString "sha256" composeJsonContent;
-          
+
       in {
         json = composeJson;
         hash = composeHash;
@@ -133,21 +133,103 @@
         jsonContent = composeJsonContent;
       };
 
-      # Enhanced image builder with reproducible settings
+      # Container registry configuration with multiple registry support
+      registryConfig = rec {
+        # Default registry - can be overridden via environment
+        defaultRegistry = let env = builtins.getEnv "NEKO_REGISTRY"; in if env != "" then env else "ghcr.io/your-org";
+
+        # Registry-specific settings
+        registries = {
+          "ghcr.io" = {
+            prefix = "ghcr.io/your-org";
+            supportsDigests = true;
+            requiresAuth = true;
+            ttl = null;
+          };
+          "docker.io" = {
+            prefix = "docker.io/your-org";
+            supportsDigests = true;
+            requiresAuth = true;
+            ttl = null;
+          };
+          "ttl.sh" = {
+            prefix = "ttl.sh";
+            supportsDigests = false;  # ttl.sh uses time-based tags
+            requiresAuth = false;
+            ttl = "1h";  # default TTL for ttl.sh
+            anonymous = true;
+          };
+          "localhost:5000" = {
+            prefix = "localhost:5000/neko";
+            supportsDigests = true;
+            requiresAuth = false;
+            ttl = null;
+          };
+        };
+
+        # Helper to get registry config
+        getRegistryConfig = registry:
+          let
+            # Extract base domain from registry string
+            baseDomain = if (builtins.match ".*://.*" registry != null)
+              then builtins.head (builtins.match "https?://([^/]+).*" registry)
+              else if (builtins.match "[^/]+/.*" registry != null)
+              then builtins.head (builtins.match "([^/]+)/.*" registry)
+              else registry;
+          in
+          (registries.${baseDomain} or (registries.${registry} or {
+            prefix = registry;
+            supportsDigests = true;
+            requiresAuth = true;
+            ttl = null;
+          }));
+
+        # Generate image name with registry prefix
+        generateImageName = { baseName, registry ? defaultRegistry }:
+          let
+            config = getRegistryConfig registry;
+            # For ttl.sh, use UUID-based naming for anonymity
+            imageName = if (config.anonymous or false)
+              then "${config.prefix}/$(uuidgen | tr '[:upper:]' '[:lower:]')"
+              else "${config.prefix}/${baseName}";
+          in imageName;
+
+        # Generate appropriate tag based on registry capabilities
+        generateTag = { variant, registry ? defaultRegistry, ttl ? null }:
+          let
+            config = getRegistryConfig registry;
+            # Use TTL tags for ttl.sh, version tags for others
+            tag = if (config.ttl or null) != null
+              then "${variant}-${buildInfo.shortRev}:${if ttl != null then ttl else config.ttl}"
+              else "${variant}-${buildInfo.shortRev}";
+          in tag;
+      };
+
+      # Enhanced image builder with reproducible settings and registry support
       buildReproducibleImage = pkgs: cuda: {
         name,
         variant,  # "generic" or "opt"
         runner,
         pyEnv,
         extraPackages ? [],
-        config ? {}
-      }: pkgs.dockerTools.buildImage {
-        inherit name;
-        tag = "${variant}-${buildInfo.shortRev}";
-        
+        config ? {},
+        registry ? registryConfig.defaultRegistry,
+        ttl ? null
+      }:
+        let
+          registryConf = registryConfig.getRegistryConfig registry;
+          finalName = if (registryConf.anonymous or false)
+            then "${registryConf.prefix}/$(uuidgen | tr '[:upper:]' '[:lower:]')"
+            else name;
+          finalTag = registryConfig.generateTag { inherit variant registry ttl; };
+        in
+        pkgs.dockerTools.buildImage {
+          name = finalName;
+          tag = finalTag;
+
         # Fixed creation time for reproducibility
         created = buildInfo.timestamp;
-        
+
         copyToRoot = (pkgs.buildEnv {
           name = "image-root";
           paths = [
@@ -160,7 +242,7 @@
           ] ++ extraPackages ++ (mkCommonSystemPackages pkgs);
           pathsToLink = [ "/bin" ];
         });
-        
+
         config = {
           Env = [
             "PYTHONUNBUFFERED=1"
@@ -171,10 +253,10 @@
             "NEKO_BUILD_VERSION=${buildInfo.version}"
             "NEKO_BUILD_TIMESTAMP=${buildInfo.timestamp}"
           ] ++ (config.Env or []);
-          
+
           WorkingDir = "/workspace";
           Entrypoint = [ "/bin/${runner.name or "neko-agent"}" ];
-          
+
           # OCI metadata for attestation
           Labels = buildInfo.imageMetadata // {
             "dev.neko.variant" = variant;
@@ -456,16 +538,16 @@ PY
               echo "  - Reproducible image builder"
               echo "  - Attestation tooling"
               echo ""
-              
+
               # Setup Phala CLI
               export NPM_CONFIG_PREFIX=$PWD/.npm-global
               export PATH=$NPM_CONFIG_PREFIX/bin:$PATH
-              
+
               if [ ! -x "$NPM_CONFIG_PREFIX/bin/phala" ]; then
                 echo "Installing Phala Cloud CLI..."
                 npm install -g phala
               fi
-              
+
               echo "Phala CLI version: $(phala --version 2>/dev/null || echo 'Installing...')"
               echo "Legacy VMM CLI: $(vmm-cli --version 2>/dev/null || echo 'Available')"
               echo ""
@@ -473,6 +555,10 @@ PY
               echo "  nix run .#build-images             - Build reproducible images"
               echo "  nix run .#deploy-to-tee            - Deploy with attestation metadata"
               echo "  nix run .#verify-attestation       - Verify TEE attestation"
+              echo ""
+              echo "🐳 Container Registry Commands:"
+              echo "  nix run .#push-to-ttl [TTL]        - Push to ttl.sh ephemeral registry"
+              echo "  nix run .#deploy-to-ttl [TTL]      - Deploy to TEE using ttl.sh"
               echo ""
               echo "Quick start (Modern CLI):"
               echo "  phala auth login <your-api-key>    - Login to Phala Cloud"
@@ -490,6 +576,13 @@ PY
               echo "  1. Run 'nix run .#build-images' to build reproducible images"
               echo "  2. Run 'nix run .#deploy-to-tee' to deploy with attestation"
               echo "  3. Use compose hash from deployment for verification"
+              echo ""
+              echo "🌐 Multi-Registry Examples:"
+              echo "  ttl.sh (1h):     NEKO_REGISTRY=ttl.sh NEKO_TTL=1h nix run .#deploy-to-tee"
+              echo "  ttl.sh (24h):    nix run .#deploy-to-ttl 24h"
+              echo "  GitHub:          NEKO_REGISTRY=ghcr.io/your-org nix run .#deploy-to-tee"
+              echo "  Docker Hub:      NEKO_REGISTRY=docker.io/your-org nix run .#deploy-to-tee"
+              echo "  Local registry:  NEKO_REGISTRY=localhost:5000 nix run .#deploy-to-tee"
               echo ""
             '';
           };
@@ -709,32 +802,12 @@ PY
             };
           };
 
-          # App-compose generators for reproducible TEE deployments
-          neko-generic-app-compose = (generateAppCompose pkgs) {
-            name = "neko-agent-generic-tee";
-            dockerComposeContent = dockerComposeWithDigests "sha256:placeholder-digest-from-build";
-            features = {
-              gateway = true;
-              publicLogs = false;  # Private for security
-              publicTcbinfo = true; # Allow attestation verification
-            };
-          };
-
-          neko-opt-app-compose = (generateAppCompose pkgs) {
-            name = "neko-agent-opt-tee";
-            dockerComposeContent = dockerComposeWithDigests "sha256:placeholder-digest-from-build";
-            features = {
-              gateway = true;
-              publicLogs = false;
-              publicTcbinfo = true;
-            };
-          };
         };
 
       # helper to build all images
       apps.x86_64-linux.build-images =
         let
-          pkgs-app = import nixpkgs { 
+          pkgs-app = import nixpkgs {
             system = "x86_64-linux";
             config.allowUnfree = true;
             overlays = nekoOverlays;
@@ -765,10 +838,10 @@ PY
           '');
         };
 
-      # TEE deployment tooling
+      # TEE deployment tooling with multi-registry support
       apps.x86_64-linux.deploy-to-tee =
         let
-          pkgs-app = import nixpkgs { 
+          pkgs-app = import nixpkgs {
             system = "x86_64-linux";
             config.allowUnfree = true;
             overlays = nekoOverlays;
@@ -778,55 +851,174 @@ PY
           type = "app";
           program = toString (pkgs-app.writeShellScript "deploy-to-tee" ''
             set -euo pipefail
-            
+
             # Load environment variables if .env exists
             if [ -f .env ]; then
               set -a; source .env; set +a
             fi
-            
+
+            # Registry configuration - can be overridden via environment
+            REGISTRY=''${NEKO_REGISTRY:-ghcr.io/your-org}
+            TTL=''${NEKO_TTL:-}
+            PUSH_IMAGE=''${NEKO_PUSH:-true}
+
             echo "🔐 Neko TEE Deployment (Attestation-Ready)"
             echo "=========================================="
             echo "Build: ${buildInfo.version} (${buildInfo.timestamp})"
+            echo "Registry: $REGISTRY"
             echo "VMM URL: ''${DSTACK_VMM_URL:-not set}"
             echo ""
-            
+
+            # Function to generate UUID for anonymous registries like ttl.sh
+            generate_uuid() {
+              if command -v uuidgen &> /dev/null; then
+                uuidgen | tr '[:upper:]' '[:lower:]'
+              else
+                # Fallback UUID generation using /dev/urandom
+                cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1 | sed 's/\(..\)/\1-/g' | sed 's/-$//'
+              fi
+            }
+
+            # Function to get registry-specific configuration
+            get_registry_config() {
+              local registry=$1
+              case "$registry" in
+                ttl.sh*)
+                  echo "anonymous=true"
+                  echo "ttl=''${TTL:-1h}"
+                  echo "auth_required=false"
+                  echo "supports_digests=false"
+                  ;;
+                ghcr.io*)
+                  echo "anonymous=false"
+                  echo "auth_required=true"
+                  echo "supports_digests=true"
+                  ;;
+                docker.io*)
+                  echo "anonymous=false"
+                  echo "auth_required=true"
+                  echo "supports_digests=true"
+                  ;;
+                localhost:*)
+                  echo "anonymous=false"
+                  echo "auth_required=false"
+                  echo "supports_digests=true"
+                  ;;
+                *)
+                  echo "anonymous=false"
+                  echo "auth_required=true"
+                  echo "supports_digests=true"
+                  ;;
+              esac
+            }
+
+            # Get registry configuration
+            REGISTRY_CONFIG=$(get_registry_config "$REGISTRY")
+            eval "$REGISTRY_CONFIG"
+
+            # Generate image name based on registry type
+            if [ "''${anonymous:-false}" = "true" ]; then
+              IMAGE_UUID=$(generate_uuid)
+              if [ -n "$TTL" ]; then
+                IMAGE_NAME="$REGISTRY/$IMAGE_UUID:$TTL"
+                DEPLOY_IMAGE_NAME="$REGISTRY/$IMAGE_UUID:$TTL"
+              else
+                IMAGE_NAME="$REGISTRY/$IMAGE_UUID:${buildInfo.shortRev}"
+                DEPLOY_IMAGE_NAME="$REGISTRY/$IMAGE_UUID:${buildInfo.shortRev}"
+              fi
+              echo "🎲 Anonymous registry detected, using UUID: $IMAGE_UUID"
+            else
+              IMAGE_NAME="$REGISTRY/neko-agent:opt-${buildInfo.shortRev}"
+              DEPLOY_IMAGE_NAME="$IMAGE_NAME"
+            fi
+
+            echo "📦 Target image: $IMAGE_NAME"
+
             # Step 1: Build reproducible images
             echo "📦 Building reproducible images..."
             nix build .#neko-agent-docker-generic
             nix build .#neko-agent-docker-opt
-            
+
             # Step 2: Load and get actual digests
             echo "🔍 Loading images and extracting digests..."
             if ! command -v docker &> /dev/null; then
                 echo "❌ Docker not available. Please ensure Docker is running."
                 exit 1
             fi
-            
+
             GENERIC_IMAGE=$(docker load < result | grep "Loaded image" | cut -d' ' -f3)
             GENERIC_DIGEST=$(docker inspect "$GENERIC_IMAGE" --format='{{index .Id}}')
-            
+
             echo "✅ Generic image: $GENERIC_IMAGE"
             echo "✅ Image digest: $GENERIC_DIGEST"
-            
-            # Step 3: Generate app-compose with real digests
+
+            # Step 3: Tag and optionally push to target registry
+            if [ "$PUSH_IMAGE" = "true" ]; then
+              echo "🏷️  Tagging image for target registry..."
+              docker tag "$GENERIC_IMAGE" "$IMAGE_NAME"
+
+              echo "📤 Pushing to registry: $REGISTRY"
+              if [ "''${auth_required:-true}" = "true" ] && [ "''${anonymous:-false}" != "true" ]; then
+                echo "🔐 Authentication may be required for $REGISTRY"
+                echo "   Make sure you're logged in with: docker login $REGISTRY"
+              fi
+
+              # Special handling for ttl.sh - show the one-liner approach
+              if [[ "$REGISTRY" == ttl.sh* ]]; then
+                echo "💡 ttl.sh one-liner approach:"
+                echo "   IMAGE=$IMAGE_UUID"
+                echo "   docker build -t ttl.sh/\$IMAGE:''${TTL:-1h} ."
+                echo "   docker push ttl.sh/\$IMAGE:''${TTL:-1h}"
+              fi
+
+              if docker push "$IMAGE_NAME"; then
+                echo "✅ Image pushed successfully"
+                DEPLOY_IMAGE_NAME="$IMAGE_NAME"
+              else
+                echo "⚠️  Push failed, using local image"
+                DEPLOY_IMAGE_NAME="$GENERIC_IMAGE"
+              fi
+            else
+              echo "🚫 Skipping image push (NEKO_PUSH=false)"
+              DEPLOY_IMAGE_NAME="$GENERIC_IMAGE"
+            fi
+
+            # Step 4: Generate app-compose with appropriate image reference
             echo "⚙️  Generating app-compose with pinned digests..."
-            
+
+            # Use digest pinning for registries that support it
+            if [ "''${supports_digests:-true}" = "true" ] && [ "$PUSH_IMAGE" = "true" ]; then
+              # Try to get the pushed image digest
+              PUSHED_DIGEST=$(docker inspect "$IMAGE_NAME" --format='{{index .RepoDigests 0}}' 2>/dev/null || echo "")
+              if [ -n "$PUSHED_DIGEST" ]; then
+                FINAL_IMAGE_REF="$PUSHED_DIGEST"
+                echo "🔒 Using digest pinning: $FINAL_IMAGE_REF"
+              else
+                FINAL_IMAGE_REF="$DEPLOY_IMAGE_NAME"
+                echo "📌 Using tag reference: $FINAL_IMAGE_REF"
+              fi
+            else
+              FINAL_IMAGE_REF="$DEPLOY_IMAGE_NAME"
+              echo "📌 Using tag reference: $FINAL_IMAGE_REF"
+            fi
+
             COMPOSE_CONTENT=$(cat <<EOF
 version: '3.8'
 services:
   neko-agent:
-    image: $GENERIC_IMAGE
+    image: $FINAL_IMAGE_REF
     restart: unless-stopped
     environment:
       - NEKO_LOGLEVEL=INFO
       - NEKO_BUILD_VERSION=${buildInfo.version}
+      - NEKO_REGISTRY=$REGISTRY
     ports:
       - "8080:8080"
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
 EOF
 )
-            
+
             # Generate app-compose.json with proper JSON escaping
             ESCAPED_COMPOSE=$(echo "$COMPOSE_CONTENT" | jq -Rs .)
             cat > neko-app-compose.json <<EOF
@@ -840,10 +1032,10 @@ EOF
   "public_tcbinfo": true
 }
 EOF
-            
+
             # Calculate compose hash (simplified version)
             COMPOSE_HASH=$(cat neko-app-compose.json | sha256sum | cut -d' ' -f1)
-            
+
             # Generate metadata
             cat > compose-metadata.json <<EOF
 {
@@ -851,17 +1043,32 @@ EOF
   "build_version": "${buildInfo.version}",
   "build_timestamp": "${buildInfo.timestamp}",
   "image_digest": "$GENERIC_DIGEST",
+  "image_name": "$IMAGE_NAME",
+  "image_ref": "$FINAL_IMAGE_REF",
+  "registry": "$REGISTRY",
   "nix_revision": "${buildInfo.revision}",
   "reproducible": true
 }
 EOF
-            
+
             echo "✅ Generated attestable app-compose.json"
             echo "📋 Metadata:"
             cat compose-metadata.json | ${pkgs-app.jq}/bin/jq .
-            
-            # Step 4: Deploy with vmm-cli (using overlay)
+
+            # Step 5: Deploy with vmm-cli (using overlay)
             echo "🚀 Deploying to TEE..."
+
+            # Show registry-specific information
+            if [[ "$REGISTRY" == ttl.sh* ]]; then
+              echo "🕒 Using ttl.sh ephemeral registry"
+              echo "   Image will expire after: ''${TTL:-1h}"
+              echo "   Pull within the TTL window on another machine:"
+              echo "   docker pull $FINAL_IMAGE_REF"
+            fi
+
+            APP_ID=$(echo -n "$COMPOSE_HASH" | cut -c1-40)
+            echo "App ID: $APP_ID"
+
             if ${pkgs-app.vmm-cli}/bin/vmm-cli deploy \
               --name "neko-reproducible-''${USER:-unknown}" \
               --image "dstack-nvidia-0.5.3" \
@@ -875,18 +1082,131 @@ EOF
                 echo "   - neko-app-compose.json"
                 echo "   - compose-metadata.json"
             fi
-            
+
             echo ""
             echo "🔍 For attestation verification:"
             echo "   Compose hash: $COMPOSE_HASH"
             echo "   This hash will be recorded in RTMR3 for verification"
+            echo ""
+            echo "🎯 Registry Usage Examples:"
+            echo "   ttl.sh (1h):     NEKO_REGISTRY=ttl.sh NEKO_TTL=1h nix run .#deploy-to-tee"
+            echo "   ttl.sh (24h):    NEKO_REGISTRY=ttl.sh NEKO_TTL=24h nix run .#deploy-to-tee"
+            echo "   GitHub:          NEKO_REGISTRY=ghcr.io/your-org nix run .#deploy-to-tee"
+            echo "   Docker Hub:      NEKO_REGISTRY=docker.io/your-org nix run .#deploy-to-tee"
+            echo "   Local registry:  NEKO_REGISTRY=localhost:5000/neko nix run .#deploy-to-tee"
+          '');
+        };
+
+      # Quick ttl.sh deployment app
+      apps.x86_64-linux.deploy-to-ttl =
+        let
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+            overlays = nekoOverlays;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "deploy-to-ttl" ''
+            set -euo pipefail
+
+            TTL=''${1:-1h}
+            echo "🕒 Quick ttl.sh deployment with TTL: $TTL"
+            echo "====================================="
+            echo ""
+
+            # Set environment for ttl.sh
+            export NEKO_REGISTRY=ttl.sh
+            export NEKO_TTL=$TTL
+
+            echo "Using ttl.sh ephemeral registry with $TTL TTL"
+            echo "Image will be anonymous and expire automatically"
+            echo ""
+
+            # Call the main deploy-to-tee script
+            exec ${toString self.apps.x86_64-linux.deploy-to-tee.program}
+          '');
+        };
+
+      # Build and push to ttl.sh (without TEE deployment)
+      apps.x86_64-linux.push-to-ttl =
+        let
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+            overlays = nekoOverlays;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "push-to-ttl" ''
+            set -euo pipefail
+
+            TTL=''${1:-1h}
+            echo "📤 Building and pushing to ttl.sh (TTL: $TTL)"
+            echo "============================================="
+            echo ""
+
+            # Function to generate UUID for anonymous registries like ttl.sh
+            generate_uuid() {
+              if command -v uuidgen &> /dev/null; then
+                uuidgen | tr '[:upper:]' '[:lower:]'
+              else
+                # Fallback UUID generation using /dev/urandom
+                cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 32 | head -n 1 | sed 's/\(..\)/\1-/g' | sed 's/-$//'
+              fi
+            }
+
+            IMAGE_UUID=$(generate_uuid)
+            IMAGE_NAME="ttl.sh/$IMAGE_UUID:$TTL"
+
+            echo "🎲 Generated UUID: $IMAGE_UUID"
+            echo "📦 Target image: $IMAGE_NAME"
+            echo ""
+
+            # Build the image
+            echo "🔨 Building reproducible image..."
+            nix build .#neko-agent-docker-opt
+
+            if ! command -v docker &> /dev/null; then
+                echo "❌ Docker not available. Please ensure Docker is running."
+                exit 1
+            fi
+
+            # Load and tag
+            echo "🔍 Loading image..."
+            BUILT_IMAGE=$(docker load < result | grep "Loaded image" | cut -d' ' -f3)
+
+            echo "🏷️  Tagging for ttl.sh..."
+            docker tag "$BUILT_IMAGE" "$IMAGE_NAME"
+
+            echo "📤 Pushing to ttl.sh..."
+            echo "💡 ttl.sh is anonymous - no authentication required"
+
+            if docker push "$IMAGE_NAME"; then
+              echo "✅ Image pushed successfully to ttl.sh!"
+              echo ""
+              echo "🔗 Your image: $IMAGE_NAME"
+              echo "⏰ Expires after: $TTL"
+              echo ""
+              echo "📋 Pull on another machine within $TTL:"
+              echo "   docker pull $IMAGE_NAME"
+              echo "   docker run --rm -p 8080:8080 $IMAGE_NAME"
+              echo ""
+              echo "🎯 For TEE deployment:"
+              echo "   NEKO_REGISTRY=ttl.sh NEKO_TTL=$TTL nix run .#deploy-to-tee"
+            else
+              echo "❌ Push failed"
+              exit 1
+            fi
           '');
         };
 
       # Attestation verification tool
       apps.x86_64-linux.verify-attestation =
         let
-          pkgs-app = import nixpkgs { 
+          pkgs-app = import nixpkgs {
             system = "x86_64-linux";
             config.allowUnfree = true;
             overlays = nekoOverlays;
@@ -896,7 +1216,7 @@ EOF
           type = "app";
           program = toString (pkgs-app.writeShellScript "verify-attestation" ''
             set -euo pipefail
-            
+
             if [ $# -lt 2 ]; then
                 echo "Usage: verify-attestation <app-id> <expected-hash>"
                 echo ""
@@ -904,14 +1224,14 @@ EOF
                 echo "  verify-attestation abc123def456 1234abcd..."
                 exit 1
             fi
-            
+
             APP_ID=$1
             EXPECTED_HASH=$2
-            
+
             echo "🔍 Verifying TEE attestation for app: $APP_ID"
             echo "Expected compose hash: $EXPECTED_HASH"
             echo ""
-            
+
             # Check if we're in a TEE environment
             if [ ! -S /var/run/dstack.sock ]; then
                 echo "❌ Not running in a TEE environment"
@@ -925,7 +1245,7 @@ EOF
                 echo "5. Verify other measurements match expected image"
                 exit 1
             fi
-            
+
             # Get TDX quote with compose hash as report data
             echo "📋 Requesting TDX quote with compose hash as report data..."
             if ! ${pkgs-app.curl}/bin/curl --unix-socket /var/run/dstack.sock \
@@ -933,10 +1253,10 @@ EOF
                 echo "❌ Failed to get TDX quote"
                 exit 1
             fi
-            
+
             # Extract and save quote
             ${pkgs-app.jq}/bin/jq -r '.quote' quote_response.json | base64 -d > quote.bin
-            
+
             echo "✅ Quote generated successfully (''${#EXPECTED_HASH} bytes)"
             echo "📄 Quote saved to: quote.bin"
             echo ""
