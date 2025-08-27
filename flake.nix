@@ -55,7 +55,7 @@
       nekoOverlays = [
         (import ./overlays/znver2-flags.nix)   # provides pkgs.nekoZnver2Env
         (import ./overlays/vmm-cli.nix)        # provides pkgs.vmm-cli
-        ml-pkgs.overlays.torch-family          # ml-pkgs torch overlay first
+        # ml-pkgs.overlays.torch-family          # ml-pkgs torch overlay first
         (import ./overlays/pylibsrtp.nix)      # python packages after torch
         (import ./overlays/aioice.nix)
         (import ./overlays/aiortc.nix)
@@ -66,7 +66,20 @@
         (import ./overlays/transformers-stream-generator.nix)
         (import ./overlays/bitsandbytes.nix)
         (import ./overlays/f5-tts.nix)
+        # pi-zero-pytorch dependencies
+        (import ./overlays/pi-zero-pytorch/accelerated-scan.nix)
+        (import ./overlays/pi-zero-pytorch/assoc-scan.nix)
+        (import ./overlays/pi-zero-pytorch/bidirectional-cross-attention.nix)
+        (import ./overlays/pi-zero-pytorch/einx.nix)
+        (import ./overlays/pi-zero-pytorch/evolutionary-policy-optimization.nix)
+        (import ./overlays/pi-zero-pytorch/hl-gauss-pytorch.nix)
+        (import ./overlays/pi-zero-pytorch/hyper-connections.nix)
+        (import ./overlays/pi-zero-pytorch/rotary-embedding-torch.nix)
+        (import ./overlays/pi-zero-pytorch/torchtyping.nix)
+        (import ./overlays/pi-zero-pytorch/x-mlps-pytorch.nix)
+        (import ./overlays/pi-zero-pytorch/x-transformers.nix)
         (import ./overlays/einops.nix)         # disable problematic tests - put last to avoid conflicts
+        (import ./overlays/pi-zero-pytorch/pi-zero-pytorch.nix)
       ];
 
       # Helper function to get common system packages
@@ -354,6 +367,9 @@
               pkgs.python3Packages.aiortc
               pkgs.python3Packages.streaming
               pkgs.python3Packages.f5-tts
+
+
+              pkgs.python3Packages.pi-zero-pytorch
               (pkgs.python3.withPackages (ps: with ps; [
                 transformers
                 torch
@@ -389,6 +405,7 @@
               pkgs.python3Packages.aiortc
               pkgs.python3Packages.streaming
               pkgs.python3Packages.f5-tts
+              pkgs.python3Packages.pi-zero-pytorch
               pkgs.nodejs_20
               pkgs.nodePackages.npm
             ];
