@@ -12,10 +12,18 @@
 
       # Build metadata for reproducible builds and attestation
       buildInfo = rec {
-        # Use flake lock for reproducible timestamps
+        # Use flake lock for reproducible timestamps, convert to RFC3339 format
         timestamp = if (self ? lastModifiedDate) 
-          then self.lastModifiedDate 
-          else "19700101000000"; # Unix epoch as fallback
+          then let
+            raw = self.lastModifiedDate;
+            year = builtins.substring 0 4 raw;
+            month = builtins.substring 4 2 raw;
+            day = builtins.substring 6 2 raw;
+            hour = builtins.substring 8 2 raw;
+            minute = builtins.substring 10 2 raw;
+            second = builtins.substring 12 2 raw;
+          in "${year}-${month}-${day}T${hour}:${minute}:${second}Z"
+          else "1970-01-01T00:00:00Z"; # Unix epoch as fallback
         
         # Git information from flake
         revision = self.rev or self.dirtyRev or "unknown";
@@ -45,7 +53,10 @@
 
       # Common overlays used throughout
       nekoOverlays = [
-        (import ./overlays/pylibsrtp.nix)
+        (import ./overlays/znver2-flags.nix)   # provides pkgs.nekoZnver2Env
+        (import ./overlays/vmm-cli.nix)        # provides pkgs.vmm-cli
+        ml-pkgs.overlays.torch-family          # ml-pkgs torch overlay first
+        (import ./overlays/pylibsrtp.nix)      # python packages after torch
         (import ./overlays/aioice.nix)
         (import ./overlays/aiortc.nix)
         (import ./overlays/streaming.nix)
@@ -55,9 +66,7 @@
         (import ./overlays/transformers-stream-generator.nix)
         (import ./overlays/bitsandbytes.nix)
         (import ./overlays/f5-tts.nix)
-        (import ./overlays/znver2-flags.nix)   # provides pkgs.nekoZnver2Env
-        (import ./overlays/vmm-cli.nix)        # provides pkgs.vmm-cli
-        ml-pkgs.overlays.torch-family
+        (import ./overlays/einops.nix)         # disable problematic tests - put last to avoid conflicts
       ];
 
       # Helper function to get common system packages
@@ -229,11 +238,11 @@
             ps.websockets
             ps."prometheus-client"
             ps.av
-            pkgs.python3Packages.pylibsrtp
-            pkgs.python3Packages.aioice
-            pkgs.python3Packages.aiortc
-            pkgs.python3Packages.streaming
-            pkgs.python3Packages.f5-tts
+            ps.pylibsrtp
+            ps.aioice
+            ps.aiortc
+            ps.streaming
+            ps.f5-tts
             ps.numpy
             ps.scipy
             ps.requests
@@ -262,11 +271,6 @@
         {
           default = pkgs.mkShell {
             buildInputs = commonSystemPackages ++ [
-              pkgs.python3Packages.pylibsrtp
-              pkgs.python3Packages.aioice
-              pkgs.python3Packages.aiortc
-              pkgs.python3Packages.streaming
-              pkgs.python3Packages.f5-tts
               (pkgs.python3.withPackages (ps: with ps; [
                 transformers
                 torch
@@ -276,6 +280,11 @@
                 websockets
                 prometheus-client
                 av
+                pylibsrtp
+                aioice
+                aiortc
+                streaming
+                f5-tts
                 zstandard
                 xxhash
                 tqdm
@@ -516,11 +525,11 @@ PY
             ps.websockets
             ps."prometheus-client"
             ps.av
-            pkgs.python3Packages.pylibsrtp
-            pkgs.python3Packages.aioice
-            pkgs.python3Packages.aiortc
-            pkgs.python3Packages.streaming
-            pkgs.python3Packages.f5-tts
+            # ps.pylibsrtp
+            # ps.aioice
+            # ps.aiortc
+            # ps.streaming
+            # ps.f5-tts
             ps.numpy
             ps.scipy
             ps.requests
@@ -725,7 +734,11 @@ PY
       # helper to build all images
       apps.x86_64-linux.build-images =
         let
-          pkgs-app = import nixpkgs { system = "x86_64-linux"; };
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+            overlays = nekoOverlays;
+          };
         in
         {
           type = "app";
@@ -755,16 +768,26 @@ PY
       # TEE deployment tooling
       apps.x86_64-linux.deploy-to-tee =
         let
-          pkgs-app = import nixpkgs { system = "x86_64-linux"; };
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+            overlays = nekoOverlays;
+          };
         in
         {
           type = "app";
           program = toString (pkgs-app.writeShellScript "deploy-to-tee" ''
             set -euo pipefail
             
+            # Load environment variables if .env exists
+            if [ -f .env ]; then
+              set -a; source .env; set +a
+            fi
+            
             echo "🔐 Neko TEE Deployment (Attestation-Ready)"
             echo "=========================================="
             echo "Build: ${buildInfo.version} (${buildInfo.timestamp})"
+            echo "VMM URL: ''${DSTACK_VMM_URL:-not set}"
             echo ""
             
             # Step 1: Build reproducible images
@@ -836,20 +859,18 @@ EOF
             echo "📋 Metadata:"
             cat compose-metadata.json | ${pkgs-app.jq}/bin/jq .
             
-            # Step 4: Deploy with vmm-cli (if available)
-            if command -v vmm-cli &> /dev/null; then
-                echo "🚀 Deploying to TEE..."
-                vmm-cli deploy \
-                  --name "neko-reproducible-''${USER:-unknown}" \
-                  --image "dstack-nvidia-0.5.3" \
-                  --compose ./neko-app-compose.json \
-                  --vcpu 4 \
-                  --memory 8G \
-                  --disk 50G
-                
+            # Step 4: Deploy with vmm-cli (using overlay)
+            echo "🚀 Deploying to TEE..."
+            if ${pkgs-app.vmm-cli}/bin/vmm-cli deploy \
+              --name "neko-reproducible-''${USER:-unknown}" \
+              --image "dstack-nvidia-0.5.3" \
+              --compose ./neko-app-compose.json \
+              --vcpu 4 \
+              --memory 8G \
+              --disk 50G; then
                 echo "🎉 Deployment complete!"
             else
-                echo "⚠️  vmm-cli not available. Generated files for manual deployment:"
+                echo "⚠️  vmm-cli deployment failed. Generated files for manual deployment:"
                 echo "   - neko-app-compose.json"
                 echo "   - compose-metadata.json"
             fi
@@ -864,7 +885,11 @@ EOF
       # Attestation verification tool
       apps.x86_64-linux.verify-attestation =
         let
-          pkgs-app = import nixpkgs { system = "x86_64-linux"; };
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+            overlays = nekoOverlays;
+          };
         in
         {
           type = "app";
