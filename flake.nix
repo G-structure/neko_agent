@@ -320,11 +320,7 @@
             ps.websockets
             ps."prometheus-client"
             ps.av
-            ps.pylibsrtp
-            ps.aioice
-            ps.aiortc
-            ps.streaming
-            ps.f5-tts
+            # Note: pylibsrtp, aioice, aiortc, streaming, f5-tts are handled as standalone packages via overlays
             ps.numpy
             ps.scipy
             ps.requests
@@ -353,6 +349,11 @@
         {
           default = pkgs.mkShell {
             buildInputs = commonSystemPackages ++ [
+              pkgs.python3Packages.pylibsrtp
+              pkgs.python3Packages.aioice
+              pkgs.python3Packages.aiortc
+              pkgs.python3Packages.streaming
+              pkgs.python3Packages.f5-tts
               (pkgs.python3.withPackages (ps: with ps; [
                 transformers
                 torch
@@ -362,11 +363,6 @@
                 websockets
                 prometheus-client
                 av
-                pylibsrtp
-                aioice
-                aiortc
-                streaming
-                f5-tts
                 zstandard
                 xxhash
                 tqdm
@@ -388,6 +384,11 @@
               cuda.cudnn
               cuda.nccl
               pyEnvGeneric
+              pkgs.python3Packages.pylibsrtp
+              pkgs.python3Packages.aioice
+              pkgs.python3Packages.aiortc
+              pkgs.python3Packages.streaming
+              pkgs.python3Packages.f5-tts
               pkgs.nodejs_20
               pkgs.nodePackages.npm
             ];
@@ -428,7 +429,7 @@ PY
               pkgs.nodejs_20
               pkgs.nodePackages.npm
               (pkgs.writeShellScriptBin "neko-services" ''
-                COMPOSE_FILE="${./docker-compose.yml}"
+                COMPOSE_FILE="${./docker-compose/neko-server.yaml}"
                 ensure_colima() {
                   if ! ${pkgs.colima}/bin/colima status >/dev/null 2>&1; then
                     echo "Starting Colima..."

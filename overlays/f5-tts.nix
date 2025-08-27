@@ -9,7 +9,7 @@ self: super: {
         owner = "SWivid";
         repo = "F5-TTS";
         rev = "main";
-        sha256 = "sha256-dhLNzpNDArAPC8yipg2zXX34wizXM0jyzO62WfFOI/g=";
+        sha256 = "sha256-MtPyqS5aNrq929pHMlDp3HFUSf+i9xYDb5xMA0Eqh9Y=";
       };
 
       nativeBuildInputs = with super.python3Packages; [
