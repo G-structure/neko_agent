@@ -18,8 +18,9 @@ self: super: {
         wheel
       ];
 
-      propagatedBuildInputs = with super.python3Packages; [
-        # torch from environment
+      propagatedBuildInputs = [
+        (super.python3Packages."torch-bin")
+        self.python3Packages.einops
       ];
 
       doCheck = false;  # Skip tests to avoid potential issues

@@ -17,16 +17,16 @@ self: super: {
         hatchling
       ];
 
-      propagatedBuildInputs = with super.python3Packages; [
-        (accelerate.override { torch = super.python3Packages."torch-bin"; })
-        adam-atan2-pytorch
-        assoc-scan
-        einops
-        einx
-        ema-pytorch
-        hl-gauss-pytorch
-        tqdm
-        super.python3Packages."torch-bin"
+      propagatedBuildInputs = [
+        (super.python3Packages.accelerate.override { torch = super.python3Packages."torch-bin"; })
+        (super.python3Packages."adam-atan2-pytorch")
+        (super.python3Packages."assoc-scan")
+        self.python3Packages.einops
+        super.python3Packages.einx
+        super.python3Packages."ema-pytorch"
+        (super.python3Packages."hl-gauss-pytorch")
+        super.python3Packages.tqdm
+        (super.python3Packages."torch-bin")
       ];
 
       doCheck = false;  # Skip tests to avoid potential issues

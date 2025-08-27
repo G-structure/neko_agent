@@ -12,16 +12,24 @@ self: super: {
         sha256 = "194c170chz59j588sxdn7pxgbi1mppvrdlkrl9m3xp5sp1drfvlh";
       };
 
+      postPatch = ''
+        substituteInPlace pyproject.toml \
+          --replace "typeguard<3,>=2.11.1" "typeguard"
+      '';
+
       build-system = with super.python3Packages; [
         hatchling
         setuptools
         wheel
       ];
 
-      propagatedBuildInputs = with super.python3Packages; [
-        typeguard
-        # torch from environment
+      propagatedBuildInputs = [
+        super.python3Packages.typeguard
+        (super.python3Packages."torch-bin")
       ];
+
+      # Relax version constraints in wheel METADATA
+      pythonRelaxDeps = [ "typeguard" ];
 
       doCheck = false;  # Skip tests to avoid potential issues
 

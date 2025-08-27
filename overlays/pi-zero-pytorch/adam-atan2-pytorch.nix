@@ -9,16 +9,15 @@ self: super: {
         owner = "lucidrains";
         repo = "adam-atan2-pytorch";
         rev = "main";
-        sha256 = super.lib.fakeSha256;
+        sha256 = "sha256-f7TpYJRoFhoqYMI9mnHOwb7ZWYmEYVQX03RLepoF5e0=";
       };
 
       build-system = with super.python3Packages; [
         hatchling
       ];
 
-      propagatedBuildInputs = with super.python3Packages; [
-        # torch provided explicitly for runtime checks
-        "torch-bin"
+      propagatedBuildInputs = [
+        (super.python3Packages."torch-bin")
       ];
 
       doCheck = false;
@@ -31,4 +30,3 @@ self: super: {
     };
   };
 }
-

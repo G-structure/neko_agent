@@ -18,9 +18,9 @@ self: super: {
         wheel
       ];
 
-      propagatedBuildInputs = with super.python3Packages; [
-        numpy
-        # torch from environment
+      propagatedBuildInputs = [
+        super.python3Packages.numpy
+        (super.python3Packages."torch-bin")
       ];
 
       doCheck = false;  # Skip tests to avoid potential issues
