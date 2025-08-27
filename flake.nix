@@ -827,13 +827,14 @@ services:
 EOF
 )
             
-            # Generate app-compose.json
+            # Generate app-compose.json with proper JSON escaping
+            ESCAPED_COMPOSE=$(echo "$COMPOSE_CONTENT" | jq -Rs .)
             cat > neko-app-compose.json <<EOF
 {
   "manifest_version": 2,
   "name": "neko-agent-reproducible",
   "runner": "docker-compose",
-  "docker_compose_file": "$COMPOSE_CONTENT",
+  "docker_compose_file": $ESCAPED_COMPOSE,
   "gateway_enabled": true,
   "public_logs": false,
   "public_tcbinfo": true
