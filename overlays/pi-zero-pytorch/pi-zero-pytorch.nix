@@ -18,13 +18,13 @@ self: super: {
 
       propagatedBuildInputs = with super.python3Packages; [
         # Core dependencies from pyproject.toml
-        accelerate
+        (accelerate.override { torch = super.python3Packages."torch-bin"; })
         accelerated-scan
         assoc-scan
         beartype
         bidirectional-cross-attention
         einx
-        einops
+        (self.python3Packages.einops)
         ema-pytorch
         evolutionary-policy-optimization
         hl-gauss-pytorch
@@ -32,11 +32,12 @@ self: super: {
         jaxtyping
         rotary-embedding-torch
         scipy
-        torchdiffeq
+        (torchdiffeq.override { torch = super.python3Packages."torch-bin"; })
         torchtyping
         tqdm
         x-mlps-pytorch
         x-transformers
+        (super.python3Packages."torch-bin")
         # Note: torch and other ML deps should come from environment/ml-pkgs
       ];
 

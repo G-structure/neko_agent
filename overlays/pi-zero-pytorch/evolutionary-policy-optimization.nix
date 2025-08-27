@@ -12,13 +12,21 @@ self: super: {
         sha256 = "1jffvcdrmfs8bzpwv8cfck39gkzqp24yp1nn1ckzzql1w2ngr48y";
       };
 
+      # Uses Hatchling backend per pyproject.toml
       build-system = with super.python3Packages; [
-        setuptools
-        wheel
+        hatchling
       ];
 
       propagatedBuildInputs = with super.python3Packages; [
-        # Add dependencies when known
+        (accelerate.override { torch = super.python3Packages."torch-bin"; })
+        adam-atan2-pytorch
+        assoc-scan
+        einops
+        einx
+        ema-pytorch
+        hl-gauss-pytorch
+        tqdm
+        super.python3Packages."torch-bin"
       ];
 
       doCheck = false;  # Skip tests to avoid potential issues

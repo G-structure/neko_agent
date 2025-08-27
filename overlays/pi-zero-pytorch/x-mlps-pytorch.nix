@@ -13,6 +13,7 @@ self: super: {
       };
 
       build-system = with super.python3Packages; [
+        hatchling
         setuptools
         wheel
       ];
