@@ -711,7 +711,7 @@ PY
         {
           # Reproducible attestation-ready Docker images
           neko-agent-docker-generic = buildImage {
-            name = "ghcr.io/your-org/neko-agent";
+            name = "neko-agent";
             variant = "generic";
             runner = runnerGeneric;
             pyEnv = pyEnvGeneric;
@@ -721,7 +721,7 @@ PY
           };
 
           neko-agent-docker-opt = buildImage {
-            name = "ghcr.io/your-org/neko-agent";
+            name = "neko-agent";
             variant = "opt";
             runner = runnerOpt;
             pyEnv = pyEnvOpt;
@@ -739,7 +739,7 @@ PY
 
           # Capture images
           neko-capture-docker-generic = buildImage {
-            name = "ghcr.io/your-org/neko-capture";
+            name = "neko-capture";
             variant = "generic";
             runner = captureRunnerGeneric;
             pyEnv = pyEnvGeneric;
@@ -749,7 +749,7 @@ PY
           };
 
           neko-capture-docker-opt = buildImage {
-            name = "ghcr.io/your-org/neko-capture";
+            name = "neko-capture";
             variant = "opt";
             runner = captureRunnerOpt;
             pyEnv = pyEnvOpt;
@@ -767,7 +767,7 @@ PY
 
           # Yap images
           neko-yap-docker-generic = buildImage {
-            name = "ghcr.io/your-org/neko-yap";
+            name = "neko-yap";
             variant = "generic";
             runner = yapRunnerGeneric;
             pyEnv = pyEnvGeneric;
@@ -777,7 +777,7 @@ PY
           };
 
           neko-yap-docker-opt = buildImage {
-            name = "ghcr.io/your-org/neko-yap";
+            name = "neko-yap";
             variant = "opt";
             runner = yapRunnerOpt;
             pyEnv = pyEnvOpt;
@@ -795,7 +795,7 @@ PY
 
           # Train images
           neko-train-docker-generic = buildImage {
-            name = "ghcr.io/your-org/neko-train";
+            name = "neko-train";
             variant = "generic";
             runner = trainRunnerGeneric;
             pyEnv = pyEnvGeneric;
@@ -805,7 +805,7 @@ PY
           };
 
           neko-train-docker-opt = buildImage {
-            name = "ghcr.io/your-org/neko-train";
+            name = "neko-train";
             variant = "opt";
             runner = trainRunnerOpt;
             pyEnv = pyEnvOpt;
@@ -971,6 +971,9 @@ PY
             echo "✅ Generic image: $GENERIC_IMAGE"
             echo "✅ Image digest: $GENERIC_DIGEST"
 
+            # Update DEPLOY_IMAGE_NAME to use the correct registry-based name when push fails
+            DEPLOY_IMAGE_NAME="$IMAGE_NAME"
+
             # Step 3: Tag and optionally push to target registry
             if [ "$PUSH_IMAGE" = "true" ]; then
               echo "🏷️  Tagging image for target registry..."
@@ -995,11 +998,15 @@ PY
                 DEPLOY_IMAGE_NAME="$IMAGE_NAME"
               else
                 echo "⚠️  Push failed, using local image"
-                DEPLOY_IMAGE_NAME="$GENERIC_IMAGE"
+                # Keep using the target registry name even if push failed
+                # The image is tagged locally with the target name
+                DEPLOY_IMAGE_NAME="$IMAGE_NAME"
               fi
             else
               echo "🚫 Skipping image push (NEKO_PUSH=false)"
-              DEPLOY_IMAGE_NAME="$GENERIC_IMAGE"
+              # Tag the image locally with the target registry name
+              docker tag "$GENERIC_IMAGE" "$IMAGE_NAME"
+              DEPLOY_IMAGE_NAME="$IMAGE_NAME"
             fi
 
             # Step 4: Generate app-compose with appropriate image reference
@@ -1339,8 +1346,8 @@ EOF
       # OCI Registry Management Apps
       apps.x86_64-linux.start-registry =
         let
-          pkgs-app = import nixpkgs { 
-            system = "x86_64-linux"; 
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
             config.allowUnfree = true;
           };
         in
@@ -1471,8 +1478,8 @@ EOF
 
       apps.x86_64-linux.stop-registry =
         let
-          pkgs-app = import nixpkgs { 
-            system = "x86_64-linux"; 
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
             config.allowUnfree = true;
           };
         in
@@ -1508,10 +1515,160 @@ EOF
           '');
         };
 
+      apps.x86_64-linux.start-registry-https =
+        let
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
+            config.allowUnfree = true;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "start-registry-https" ''
+            set -euo pipefail
+
+            # Load environment variables if .env exists
+            if [ -f .env ]; then
+              set -a; source .env; set +a
+            fi
+
+            # Default configuration
+            REGISTRY_PORT=''${NEKO_REGISTRY_PORT:-5000}
+            REGISTRY_USER=''${NEKO_REGISTRY_USER:-neko}
+            REGISTRY_PASSWORD=''${NEKO_REGISTRY_PASSWORD:-pushme}
+            REGISTRY_DATA_DIR=''${NEKO_REGISTRY_DATA_DIR:-$PWD/registry-data}
+            REGISTRY_AUTH_DIR=''${NEKO_REGISTRY_AUTH_DIR:-$PWD/auth}
+            REGISTRY_CERTS_DIR=''${NEKO_REGISTRY_CERTS_DIR:-$PWD/certs}
+
+            echo "🐳 Starting HTTPS OCI Registry with Tailscale Certificates"
+            echo "=========================================================="
+            echo "Port: $REGISTRY_PORT"
+            echo "User: $REGISTRY_USER"
+            echo "Auth dir: $REGISTRY_AUTH_DIR"
+            echo "Data dir: $REGISTRY_DATA_DIR"
+            echo "Certs dir: $REGISTRY_CERTS_DIR"
+            echo ""
+
+            # Check if Docker and Tailscale are available
+            command -v docker >/dev/null || { echo "❌ Docker not available"; exit 1; }
+            command -v tailscale >/dev/null || { echo "❌ Tailscale CLI not found"; exit 1; }
+            tailscale status >/dev/null 2>&1 || { echo "❌ Not logged in: run 'tailscale up'"; exit 1; }
+
+            # Get device name for certificate generation
+            DEVICE_NAME=$(tailscale status --json | ${pkgs-app.jq}/bin/jq -r '.Self.DNSName' | sed 's/\.$//')
+            echo "📛 Device hostname: $DEVICE_NAME"
+
+            # Create directories
+            mkdir -p "$REGISTRY_AUTH_DIR" "$REGISTRY_CERTS_DIR"
+
+            # Generate Tailscale certificates
+            echo "🔐 Generating Tailscale HTTPS certificates..."
+            if ! tailscale cert --cert-file "$REGISTRY_CERTS_DIR/registry.crt" --key-file "$REGISTRY_CERTS_DIR/registry.key" "$DEVICE_NAME"; then
+              echo "❌ Failed to obtain HTTPS certificate"
+              echo ""
+              echo "🔧 To enable HTTPS certificates in your tailnet:"
+              echo "  1. Go to https://login.tailscale.com/admin/dns"
+              echo "  2. Enable MagicDNS if not already enabled"
+              echo "  3. Under 'HTTPS Certificates', click 'Enable HTTPS'"
+              echo "  4. Acknowledge the warning about machine names being public"
+              echo "  5. Run this script again"
+              exit 1
+            fi
+            echo "✅ HTTPS certificate generated successfully"
+
+            # Generate htpasswd file with bcrypt
+            echo "🔐 Generating htpasswd file with bcrypt..."
+            if [ ! -f "$REGISTRY_AUTH_DIR/htpasswd" ] || [ "''${NEKO_REGISTRY_REGENERATE_AUTH:-false}" = "true" ]; then
+              docker run --rm httpd:2.4-alpine htpasswd -Bbn "$REGISTRY_USER" "$REGISTRY_PASSWORD" > "$REGISTRY_AUTH_DIR/htpasswd"
+              echo "✅ Authentication file created: $REGISTRY_AUTH_DIR/htpasswd"
+            else
+              if [ ! -s "$REGISTRY_AUTH_DIR/htpasswd" ]; then
+                echo "❌ Existing htpasswd file is empty or corrupted"
+                exit 1
+              fi
+              echo "✅ Using existing authentication file: $REGISTRY_AUTH_DIR/htpasswd"
+            fi
+
+            # Stop existing registry if running
+            if docker ps --format "table {{.Names}}" | grep -q "^local-registry-https$"; then
+              echo "🛑 Stopping existing HTTPS registry..."
+              docker stop local-registry-https >/dev/null 2>&1 || true
+            fi
+
+            # Remove existing registry container if it exists
+            if docker ps -a --format "table {{.Names}}" | grep -q "^local-registry-https$"; then
+              echo "🗑️  Removing existing HTTPS registry container..."
+              docker rm local-registry-https >/dev/null 2>&1 || true
+            fi
+
+            # Create named volume for registry data if it doesn't exist
+            if ! docker volume ls --format "table {{.Name}}" | grep -q "^registry-data-https$"; then
+              echo "📁 Creating Docker volume for registry data..."
+              docker volume create registry-data-https >/dev/null
+            fi
+
+            # Start the HTTPS registry
+            echo "🚀 Starting registry:2 with HTTPS and authentication..."
+            docker run -d --name local-registry-https \
+              -p "$REGISTRY_PORT:5000" \
+              -v registry-data-https:/var/lib/registry \
+              -v "$REGISTRY_AUTH_DIR:/auth" \
+              -v "$REGISTRY_CERTS_DIR:/certs" \
+              -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+              -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+              -e REGISTRY_AUTH=htpasswd \
+              -e REGISTRY_AUTH_HTPASSWD_REALM="Registry Realm" \
+              -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+              registry:2
+
+            # Wait for registry to start
+            echo "⏳ Waiting for HTTPS registry to start..."
+            for i in {1..15}; do
+              if curl -ksSI "https://localhost:$REGISTRY_PORT/v2/" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 2
+            done
+
+            # Test the registry
+            echo "🔍 Testing HTTPS registry API..."
+            if curl -ksSI -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "https://localhost:$REGISTRY_PORT/v2/_catalog" >/dev/null; then
+              echo "✅ HTTPS Registry is running and responding"
+              echo ""
+              echo "📋 Registry Information:"
+              echo "  URL: https://$DEVICE_NAME:$REGISTRY_PORT"
+              echo "  API: https://$DEVICE_NAME:$REGISTRY_PORT/v2/_catalog"
+              echo "  User: $REGISTRY_USER"
+              echo "  Password: $REGISTRY_PASSWORD"
+              echo ""
+              echo "🔑 Login command:"
+              echo "  docker login $DEVICE_NAME:$REGISTRY_PORT -u $REGISTRY_USER"
+              echo ""
+              echo "📤 Push example:"
+              echo "  docker tag myimage $DEVICE_NAME:$REGISTRY_PORT/neko/myimage:latest"
+              echo "  docker push $DEVICE_NAME:$REGISTRY_PORT/neko/myimage:latest"
+              echo ""
+              echo "🎯 For deploy-to-tee:"
+              echo "  NEKO_REGISTRY=$DEVICE_NAME:$REGISTRY_PORT/neko nix run .#deploy-to-tee"
+              echo ""
+              echo "🛑 Stop registry:"
+              echo "  docker stop local-registry-https && docker rm local-registry-https"
+              echo ""
+              echo "🌐 Now use Tailscale Serve to expose it to your tailnet:"
+              echo "  tailscale serve --https=443 --bg https://localhost:$REGISTRY_PORT"
+            else
+              echo "❌ HTTPS Registry failed to start or is not responding"
+              echo "📋 Check container logs:"
+              echo "  docker logs local-registry-https"
+              exit 1
+            fi
+          '');
+        };
+
       apps.x86_64-linux.start-tailscale-funnel =
         let
-          pkgs-app = import nixpkgs { 
-            system = "x86_64-linux"; 
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
             config.allowUnfree = true;
           };
         in
@@ -1520,61 +1677,87 @@ EOF
           program = toString (pkgs-app.writeShellScript "start-tailscale-funnel" ''
             set -euo pipefail
 
-            # Load environment variables if .env exists
-            if [ -f .env ]; then
-              set -a; source .env; set +a
-            fi
+            if [ -f .env ]; then set -a; source .env; set +a; fi
 
             REGISTRY_PORT=''${NEKO_REGISTRY_PORT:-5000}
+            REGISTRY_USER=''${NEKO_REGISTRY_USER:-neko}
+            REGISTRY_PASSWORD=''${NEKO_REGISTRY_PASSWORD:-pushme}
 
             echo "🌐 Starting Tailscale Funnel for Registry"
             echo "=========================================="
             echo "Local port: $REGISTRY_PORT"
             echo ""
 
-            # Check if tailscale is available
-            if ! command -v tailscale &> /dev/null; then
-              echo "❌ Tailscale CLI not available."
-              echo "   Please install Tailscale and ensure you're logged in."
-              echo "   Visit: https://tailscale.com/download"
+            command -v tailscale >/dev/null || { echo "❌ tailscale CLI not found"; exit 1; }
+            tailscale status >/dev/null 2>&1 || { echo "❌ Not logged in: run 'tailscale up'"; exit 1; }
+
+            # Get device name first to test certificate availability
+            DEVICE_NAME=$(tailscale status --json | ${pkgs-app.jq}/bin/jq -r '.Self.DNSName' | sed 's/\.$//')
+            echo "📛 Device hostname: $DEVICE_NAME"
+
+            # Check if HTTPS certificates are available by attempting to get one
+            echo "🔐 Checking HTTPS certificate availability..."
+            if ! tailscale cert --cert-file /tmp/test-cert.pem --key-file /tmp/test-key.pem "$DEVICE_NAME"; then
+              echo "❌ Failed to obtain HTTPS certificate"
+              echo ""
+              echo "🔧 To enable HTTPS certificates in your tailnet:"
+              echo "  1. Go to https://login.tailscale.com/admin/dns"
+              echo "  2. Enable MagicDNS if not already enabled"
+              echo "  3. Under 'HTTPS Certificates', click 'Enable HTTPS'"
+              echo "  4. Acknowledge the warning about machine names being public"
+              echo "  5. Run this script again"
+              echo ""
+              echo "⚠️  Note: Your tailnet and machine names will be published on a public ledger"
+              exit 1
+            fi
+            echo "✅ HTTPS certificate obtained successfully"
+
+            # Clean up test certificate files
+            rm -f /tmp/test-cert.pem /tmp/test-key.pem
+
+            # Ensure the local registry is reachable (200 if no auth, 401 if auth)
+            if ! curl -sSI "http://127.0.0.1:$REGISTRY_PORT/v2/" | grep -qiE '^HTTP/.* (200|401)'; then
+              echo "❌ Registry not responding on :$REGISTRY_PORT (start it via: nix run .#start-registry)"
               exit 1
             fi
 
-            # Check if authenticated
-            if ! tailscale status >/dev/null 2>&1; then
-              echo "❌ Not authenticated with Tailscale."
-              echo "   Please run: tailscale up"
+            # Ensure operator rights (so we can manage serve/funnel without sudo)
+            if ! tailscale status --json | ${pkgs-app.jq}/bin/jq -e '.Self | .User // empty' >/dev/null; then
+              echo "ℹ️  If you see permission errors, run: sudo tailscale set --operator=$USER"
+            fi
+
+            echo "🧹 Resetting any existing Serve/Funnel config…"
+            tailscale funnel --https=443 off 2>/dev/null || true
+            tailscale serve reset 2>/dev/null || true
+
+            echo "🌍 Enabling Funnel (which includes Serve): https://$DEVICE_NAME  →  http://127.0.0.1:$REGISTRY_PORT"
+            if ! tailscale funnel --https=443 --bg http://127.0.0.1:$REGISTRY_PORT; then
+              echo "❌ Funnel enable failed. Ensure Funnel is allowed for this device/tailnet."
+              echo "   See: https://tailscale.com/kb/1223/funnel"
               exit 1
             fi
 
-            # Check if registry is running
-            REGISTRY_USER=''${NEKO_REGISTRY_USER:-neko}
-            REGISTRY_PASSWORD=''${NEKO_REGISTRY_PASSWORD:-pushme}
-            if ! curl -sf -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "http://localhost:$REGISTRY_PORT/v2/_catalog" >/dev/null; then
-              echo "❌ Registry not running on port $REGISTRY_PORT"
-              echo "   Please run: nix run .#start-registry"
-              exit 1
+            echo "🔍 Verifying public registry endpoint…"
+            sleep 5
+
+            # Test the HTTPS endpoint with proper certificates
+            HEADERS=$(curl -sSI "https://$DEVICE_NAME/v2/" 2>/dev/null || true)
+            if echo "$HEADERS" | grep -qiE '^HTTP/.* 200'; then
+              echo "✅ Public HTTPS OK with valid certificate"
+            elif echo "$HEADERS" | grep -qiE '^HTTP/.* 401' && echo "$HEADERS" | grep -qi 'WWW-Authenticate:'; then
+              echo "✅ Public HTTPS OK with valid certificate and auth challenge detected"
+            else
+              echo "⚠️  Endpoint verification failed. Troubleshooting:"
+              echo "   Manual test: curl -i https://$DEVICE_NAME/v2/"
+              echo "   If certificate errors persist, ensure HTTPS certificates are properly enabled in your tailnet"
+              echo ""
+              echo "Response headers:"
+              echo "$HEADERS"
             fi
 
-            echo "🔍 Checking Tailscale Funnel availability..."
-            if ! tailscale funnel status >/dev/null 2>&1; then
-              echo "⚠️  Tailscale Funnel may not be available on your node."
-              echo "   Proceeding anyway..."
-            fi
-
-            echo "🚀 Starting Tailscale Funnel..."
-            echo "   This will make your registry available over HTTPS"
-            echo "   Press Ctrl+C to stop"
             echo ""
-
-            # Get device name for display
-            DEVICE_NAME=$(tailscale status --json | ${pkgs-app.jq}/bin/jq -r '.Self.DNSName // "unknown"' | sed 's/\.$//')
-
-            echo "📋 Expected public URL: https://$DEVICE_NAME/"
-            echo "🔑 Authentication will be required (check .env or defaults)"
-            echo ""
-            echo "📤 Usage from another machine:"
-            echo "  docker login $DEVICE_NAME"
+            echo "📋 Use from another machine:"
+            echo "  docker login $DEVICE_NAME -u $REGISTRY_USER"
             echo "  docker tag myimage $DEVICE_NAME/neko/myimage:latest"
             echo "  docker push $DEVICE_NAME/neko/myimage:latest"
             echo ""
@@ -1582,15 +1765,19 @@ EOF
             echo "  NEKO_REGISTRY=$DEVICE_NAME/neko nix run .#deploy-to-tee"
             echo ""
 
-            # Start the funnel
-            exec tailscale funnel $REGISTRY_PORT
+            # Keep process alive and print status periodically
+            trap 'echo; echo "🛑 Disabling Funnel"; tailscale funnel --https=443 off; tailscale serve reset; exit 0' INT TERM
+            while true; do
+              sleep 30
+              tailscale funnel status || true
+            done
           '');
         };
 
       apps.x86_64-linux.start-cloudflare-tunnel =
         let
-          pkgs-app = import nixpkgs { 
-            system = "x86_64-linux"; 
+          pkgs-app = import nixpkgs {
+            system = "x86_64-linux";
             config.allowUnfree = true;
           };
         in
@@ -1655,7 +1842,7 @@ EOF
             CONFIG_FILE="$HOME/.cloudflared/config.yml"
             echo "📝 Creating/updating tunnel configuration..."
             mkdir -p "$(dirname "$CONFIG_FILE")"
-            
+
             cat > "$CONFIG_FILE" <<EOF
 tunnel: $TUNNEL_ID
 credentials-file: $HOME/.cloudflared/$TUNNEL_ID.json
