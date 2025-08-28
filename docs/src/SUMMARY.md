@@ -22,6 +22,7 @@
   - [TTS Service](./developer-guide/components/yap.md)
 - [Development Setup](./developer-guide/development.md)
 - [Nix Flake Environment](./developer-guide/nix-flake.md)
+- [Nix Flake Python Packaging](./developer-guide/nix-flake-packaging.md)
 - [Neko Server Integration](./developer-guide/neko.md)
 - [MosaicML Streaming](./developer-guide/mosaicml-streaming.md)
 

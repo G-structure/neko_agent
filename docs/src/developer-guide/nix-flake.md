@@ -10,6 +10,8 @@ The flake (`flake.nix`) is designed around multiple specialized development envi
 - **Documentation** - Publishing and development of project documentation
 - **Container Operations** - Docker and Neko server management
 - **Performance Optimization** - CPU-optimized builds with architecture-specific flags
+- **TEE Deployment** - Trusted Execution Environment deployment with attestation
+- **Registry Management** - Multi-registry container deployment support
 - **Cross-Platform Support** - Works on x86_64-Linux and aarch64-Darwin (Apple Silicon)
 
 ```mermaid
@@ -66,6 +68,7 @@ graph TB
     Shells --> Docs
     Shells --> CPUOpt
     Shells --> GPUOpt
+    Shells --> TEE
 ```
 
 ## Flake Inputs
@@ -86,9 +89,30 @@ inputs = {
 
 **Why nixos-unstable?**
 - **Latest packages** - Access to newest versions of AI/ML libraries
-- **CUDA support** - Most recent NVIDIA driver and toolkit support
+- **CUDA support** - Most recent NVIDIA driver and toolkit support (CUDA 12.8)
 - **Python ecosystem** - Up-to-date Python packages for transformers and WebRTC
 - **Security updates** - Timely security patches for all dependencies
+
+## Build Metadata and Reproducibility
+
+The flake includes comprehensive build metadata for reproducible builds and attestation:
+
+```nix
+buildInfo = rec {
+  timestamp = "${year}-${month}-${day}T${hour}:${minute}:${second}Z";
+  revision = self.rev or self.dirtyRev or "unknown";
+  shortRev = builtins.substring 0 8 revision;
+  version = if (self ? rev) then shortRev else "${shortRev}-dirty";
+  nixpkgsRev = nixpkgs.rev or "unknown";
+  
+  imageMetadata = {
+    "org.opencontainers.image.title" = "Neko Agent";
+    "org.opencontainers.image.created" = timestamp;
+    "org.opencontainers.image.revision" = revision;
+    "dev.neko.build.reproducible" = "true";
+  };
+};
+```
 
 ## Custom Overlay System
 
@@ -122,12 +146,28 @@ nekoOverlays = [
 | `transformers-stream-generator.nix` | `transformers-stream-generator` | Streaming text generation |
 | `bitsandbytes.nix` | `bitsandbytes` | 8-bit optimizers for PyTorch |
 
+### Pi-Zero PyTorch Dependencies
+
+The flake includes comprehensive packaging for pi-zero-pytorch and its dependencies:
+
+| Overlay | Package | Purpose |
+|---------|---------|---------|
+| `pi-zero-pytorch/pi-zero-pytorch.nix` | `pi-zero-pytorch` | Main π0 implementation in PyTorch |
+| `pi-zero-pytorch/einx.nix` | `einx` | Universal tensor operations with Einstein notation |
+| `pi-zero-pytorch/x-transformers.nix` | `x-transformers` | Transformer architectures library |
+| `pi-zero-pytorch/rotary-embedding-torch.nix` | `rotary-embedding-torch` | Rotary positional embeddings |
+| `pi-zero-pytorch/accelerated-scan.nix` | `accelerated-scan` | Accelerated scan operations |
+| `pi-zero-pytorch/bidirectional-cross-attention.nix` | `bidirectional-cross-attention` | Cross-attention mechanisms |
+| `pi-zero-pytorch/hl-gauss-pytorch.nix` | `hl-gauss-pytorch` | Gaussian operations for ML |
+| `pi-zero-pytorch/evolutionary-policy-optimization.nix` | `evolutionary-policy-optimization` | Evolution strategies |
+
 ### Performance Optimization
 
 | Overlay | Package | Purpose |
 |---------|---------|---------|
 | `cached-path.nix` | `cached-path` | Efficient file caching utilities |
 | `znver2-flags.nix` | `nekoZnver2Env` | AMD Zen2 CPU optimization flags |
+| `vmm-cli.nix` | `vmm-cli` | Virtual machine management CLI |
 
 **Example Znver2 Optimization**:
 ```bash
@@ -449,19 +489,91 @@ print(f'GPU matrix multiply: {time.time() - start:.4f}s')
 - Performance benchmarking and optimization
 - Production deployments requiring peak performance
 
+### 8. TEE Shell (`tee`)
+
+**Purpose**: Trusted Execution Environment deployment and attestation.
+
+**Usage**:
+```bash
+nix develop .#tee
+```
+
+**TEE Deployment Stack**:
+- **Phala Cloud CLI** - Modern CLI for TEE deployments
+- **Legacy VMM CLI** - Compatible with older dstack systems
+- **Docker & Docker Compose** - Container orchestration
+- **Bun Runtime** - Fast JavaScript runtime
+- **Reproducible Image Builder** - Attestation-ready container building
+
+**Available Commands**:
+```bash
+# Modern Phala CLI
+phala auth login <api-key>      # Authenticate with Phala Cloud
+phala status                    # Check authentication status
+phala cvms list                 # List Confidential VMs
+phala nodes                     # List available TEE nodes
+
+# Legacy VMM CLI (if needed)
+vmm-cli lsvm                    # List virtual machines
+vmm-cli lsimage                 # List available images
+vmm-cli lsgpu                   # List available GPUs
+
+# Reproducible builds
+nix run .#build-images          # Build reproducible images
+nix run .#deploy-to-tee         # Deploy with attestation metadata
+nix run .#verify-attestation    # Verify TEE attestation
+```
+
+**Multi-Registry Support**:
+```bash
+# Deploy to ttl.sh (ephemeral registry)
+NEKO_REGISTRY=ttl.sh NEKO_TTL=1h nix run .#deploy-to-tee
+nix run .#deploy-to-ttl 24h
+
+# Deploy to GitHub Container Registry
+NEKO_REGISTRY=ghcr.io/your-org nix run .#deploy-to-tee
+
+# Deploy to Docker Hub
+NEKO_REGISTRY=docker.io/your-org nix run .#deploy-to-tee
+
+# Deploy to local registry
+NEKO_REGISTRY=localhost:5000/neko nix run .#deploy-to-tee
+```
+
+**When to Use**:
+- Deploying to Trusted Execution Environments
+- Creating attestable, reproducible deployments
+- Multi-registry container management
+- TEE-based inference deployments
+- Confidential computing workloads
+
 ## Docker Images and Packages
 
 The flake builds optimized Docker images for production deployment:
 
 ### Available Images
 
+The flake now builds multiple specialized images for different components:
+
 ```bash
-# Build both images
+# Build all images
 nix run .#build-images
 
-# Build individual images
+# Agent images
 nix build .#neko-agent-docker-generic
 nix build .#neko-agent-docker-opt
+
+# Capture images  
+nix build .#neko-capture-docker-generic
+nix build .#neko-capture-docker-opt
+
+# YAP (TTS) images
+nix build .#neko-yap-docker-generic
+nix build .#neko-yap-docker-opt
+
+# Train images
+nix build .#neko-train-docker-generic
+nix build .#neko-train-docker-opt
 ```
 
 ### 1. Generic CUDA Image (`neko-agent-docker-generic`)
@@ -547,7 +659,7 @@ neko-agent-docker-generic = pkgs.dockerTools.buildImage {
 
 ## Utility Apps
 
-The flake provides utility applications for common tasks:
+The flake provides comprehensive utility applications for common tasks:
 
 ### Documentation Apps
 
@@ -562,25 +674,50 @@ nix run .#docs-serve
 nix run .#docs-check
 ```
 
-**Implementation**:
-```nix
-apps.x86_64-linux.docs-serve = {
-  type = "app";
-  program = toString (pkgs.writeShellScript "docs-serve" ''
-    set -euo pipefail
-    cd docs
-    echo "📚 Starting documentation server at http://localhost:3000"
-    echo "📝 Edit files in docs/src/ for live reload"
-    ${pkgs.mdbook}/bin/mdbook serve --hostname 0.0.0.0 --port 3000 --open
-  '');
-};
-```
-
-### Build Apps
+### Build and Deployment Apps
 
 ```bash
-# Build all Docker images
+# Build all Docker images with attestation metadata
 nix run .#build-images
+
+# TEE deployment with multi-registry support
+nix run .#deploy-to-tee
+nix run .#deploy-to-ttl 24h              # Quick ttl.sh deployment
+nix run .#push-to-ttl 1h                 # Just push to ttl.sh
+
+# Attestation verification
+nix run .#verify-attestation <app-id> <expected-hash>
+```
+
+### Container Registry Apps
+
+```bash
+# Local registry management
+nix run .#start-registry                 # HTTP registry with auth
+nix run .#start-registry-https           # HTTPS with Tailscale certs
+nix run .#stop-registry
+
+# Public exposure
+nix run .#start-tailscale-funnel         # Expose via Tailscale Funnel
+nix run .#start-cloudflare-tunnel        # Expose via Cloudflare Tunnel
+```
+
+**Registry Configuration Examples**:
+```bash
+# Environment variables for registry customization
+NEKO_REGISTRY_PORT=5000
+NEKO_REGISTRY_USER=neko
+NEKO_REGISTRY_PASSWORD=pushme
+NEKO_REGISTRY_DATA_DIR=$PWD/registry-data
+NEKO_REGISTRY_AUTH_DIR=$PWD/auth
+NEKO_REGISTRY_CERTS_DIR=$PWD/certs
+
+# Tailscale Funnel setup
+NEKO_REGISTRY=your-device.tail-scale.ts.net/neko
+
+# Cloudflare Tunnel setup
+NEKO_CF_TUNNEL_NAME=neko-registry
+NEKO_CF_HOSTNAME=registry.example.com
 ```
 
 ## Common Development Workflows
@@ -670,6 +807,52 @@ python benchmarks/inference_speed.py
 
 # 4. Build optimized container
 nix build .#neko-agent-docker-opt
+```
+
+### TEE Deployment Workflow
+
+```bash
+# 1. Enter TEE environment
+nix develop .#tee
+
+# 2. Build reproducible images
+nix run .#build-images
+
+# 3. Deploy to TEE (with registry choice)
+# Option A: Use ttl.sh for testing
+nix run .#deploy-to-ttl 1h
+
+# Option B: Use GitHub Container Registry
+NEKO_REGISTRY=ghcr.io/your-org nix run .#deploy-to-tee
+
+# Option C: Use local registry (start it first)
+nix run .#start-registry  # In another terminal
+NEKO_REGISTRY=localhost:5000/neko nix run .#deploy-to-tee
+
+# 4. Verify attestation (inside TEE)
+nix run .#verify-attestation <app-id> <compose-hash>
+
+# 5. Check deployment status
+phala cvms list  # Modern CLI
+# or
+vmm-cli lsvm    # Legacy CLI
+```
+
+### Multi-Registry Development
+
+```bash
+# Setup local registry for testing
+nix run .#start-registry
+
+# Push images to multiple registries
+docker tag neko-agent:latest localhost:5000/neko/agent:v1
+docker push localhost:5000/neko/agent:v1
+
+# Use Tailscale for team access
+nix run .#start-tailscale-funnel
+
+# Use Cloudflare for public access
+nix run .#start-cloudflare-tunnel
 ```
 
 ## Environment Variables and Configuration
