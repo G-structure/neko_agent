@@ -1335,5 +1335,369 @@ EOF
             echo "✅ Documentation validation complete"
           '');
         };
+
+      # OCI Registry Management Apps
+      apps.x86_64-linux.start-registry =
+        let
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux"; 
+            config.allowUnfree = true;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "start-registry" ''
+            set -euo pipefail
+
+            # Load environment variables if .env exists
+            if [ -f .env ]; then
+              set -a; source .env; set +a
+            fi
+
+            # Default configuration
+            REGISTRY_PORT=''${NEKO_REGISTRY_PORT:-5000}
+            REGISTRY_USER=''${NEKO_REGISTRY_USER:-neko}
+            REGISTRY_PASSWORD=''${NEKO_REGISTRY_PASSWORD:-pushme}
+            REGISTRY_DATA_DIR=''${NEKO_REGISTRY_DATA_DIR:-$PWD/registry-data}
+            REGISTRY_AUTH_DIR=''${NEKO_REGISTRY_AUTH_DIR:-$PWD/auth}
+
+            echo "🐳 Starting Local OCI Registry with Basic Auth"
+            echo "=============================================="
+            echo "Port: $REGISTRY_PORT"
+            echo "User: $REGISTRY_USER"
+            echo "Auth dir: $REGISTRY_AUTH_DIR"
+            echo "Data dir: $REGISTRY_DATA_DIR"
+            echo ""
+
+            # Check if Docker is available
+            if ! command -v docker &> /dev/null; then
+              echo "❌ Docker not available. Please ensure Docker is running."
+              exit 1
+            fi
+
+            # Create auth directory if it doesn't exist
+            mkdir -p "$REGISTRY_AUTH_DIR"
+
+            # Generate htpasswd file with bcrypt
+            echo "🔐 Generating htpasswd file with bcrypt..."
+            if [ ! -f "$REGISTRY_AUTH_DIR/htpasswd" ] || [ "''${NEKO_REGISTRY_REGENERATE_AUTH:-false}" = "true" ]; then
+              docker run --rm httpd:2.4-alpine htpasswd -Bbn "$REGISTRY_USER" "$REGISTRY_PASSWORD" > "$REGISTRY_AUTH_DIR/htpasswd"
+              echo "✅ Authentication file created: $REGISTRY_AUTH_DIR/htpasswd"
+            else
+              # Check if existing htpasswd file is empty or corrupted
+              if [ ! -s "$REGISTRY_AUTH_DIR/htpasswd" ]; then
+                echo "❌ Existing htpasswd file is empty or corrupted"
+                echo "   File: $REGISTRY_AUTH_DIR/htpasswd"
+                echo "   This will cause authentication failures in the registry."
+                echo ""
+                echo "🔧 To fix this, run with forced regeneration:"
+                echo "   NEKO_REGISTRY_REGENERATE_AUTH=true nix run .#start-registry"
+                echo ""
+                exit 1
+              fi
+              echo "✅ Using existing authentication file: $REGISTRY_AUTH_DIR/htpasswd"
+            fi
+
+            # Stop existing registry if running
+            if docker ps --format "table {{.Names}}" | grep -q "^local-registry$"; then
+              echo "🛑 Stopping existing registry..."
+              docker stop local-registry >/dev/null 2>&1 || true
+            fi
+
+            # Remove existing registry container if it exists
+            if docker ps -a --format "table {{.Names}}" | grep -q "^local-registry$"; then
+              echo "🗑️  Removing existing registry container..."
+              docker rm local-registry >/dev/null 2>&1 || true
+            fi
+
+            # Create named volume for registry data if it doesn't exist
+            if ! docker volume ls --format "table {{.Name}}" | grep -q "^registry-data$"; then
+              echo "📁 Creating Docker volume for registry data..."
+              docker volume create registry-data >/dev/null
+            fi
+
+            # Start the registry
+            echo "🚀 Starting registry:2 with authentication..."
+            docker run -d --name local-registry \
+              -p "$REGISTRY_PORT:5000" \
+              -v registry-data:/var/lib/registry \
+              -v "$REGISTRY_AUTH_DIR:/auth" \
+              -e REGISTRY_AUTH=htpasswd \
+              -e REGISTRY_AUTH_HTPASSWD_REALM="Registry Realm" \
+              -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+              registry:2
+
+            # Wait for registry to start
+            echo "⏳ Waiting for registry to start..."
+            for i in {1..10}; do
+              if curl -sf http://localhost:$REGISTRY_PORT/v2/_catalog >/dev/null 2>&1; then
+                break
+              fi
+              sleep 1
+            done
+
+            # Test the registry
+            echo "🔍 Testing registry API..."
+            if curl -sf -u "$REGISTRY_USER:$REGISTRY_PASSWORD" http://localhost:$REGISTRY_PORT/v2/_catalog >/dev/null; then
+              echo "✅ Registry is running and responding"
+              echo ""
+              echo "📋 Registry Information:"
+              echo "  URL: http://localhost:$REGISTRY_PORT"
+              echo "  API: http://localhost:$REGISTRY_PORT/v2/_catalog"
+              echo "  User: $REGISTRY_USER"
+              echo "  Password: $REGISTRY_PASSWORD"
+              echo ""
+              echo "🔑 Login command:"
+              echo "  docker login localhost:$REGISTRY_PORT -u $REGISTRY_USER -p $REGISTRY_PASSWORD"
+              echo ""
+              echo "📤 Push example:"
+              echo "  docker tag myimage localhost:$REGISTRY_PORT/neko/myimage:latest"
+              echo "  docker push localhost:$REGISTRY_PORT/neko/myimage:latest"
+              echo ""
+              echo "🛑 Stop registry:"
+              echo "  docker stop local-registry && docker rm local-registry"
+              echo ""
+              echo "🌐 To make this public with HTTPS, run one of:"
+              echo "  nix run .#start-tailscale-funnel"
+              echo "  nix run .#start-cloudflare-tunnel"
+            else
+              echo "❌ Registry failed to start or is not responding"
+              echo "📋 Check container logs:"
+              echo "  docker logs local-registry"
+              exit 1
+            fi
+          '');
+        };
+
+      apps.x86_64-linux.stop-registry =
+        let
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux"; 
+            config.allowUnfree = true;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "stop-registry" ''
+            set -euo pipefail
+
+            echo "🛑 Stopping Local OCI Registry"
+            echo "=============================="
+
+            # Check if Docker is available
+            if ! command -v docker &> /dev/null; then
+              echo "❌ Docker not available."
+              exit 1
+            fi
+
+            # Stop and remove the registry container
+            if docker ps --format "table {{.Names}}" | grep -q "^local-registry$"; then
+              echo "🛑 Stopping registry container..."
+              docker stop local-registry
+            fi
+
+            if docker ps -a --format "table {{.Names}}" | grep -q "^local-registry$"; then
+              echo "🗑️  Removing registry container..."
+              docker rm local-registry
+            fi
+
+            echo "✅ Registry stopped and removed"
+            echo ""
+            echo "💡 Registry data is preserved in Docker volume 'registry-data'"
+            echo "   To remove data: docker volume rm registry-data"
+          '');
+        };
+
+      apps.x86_64-linux.start-tailscale-funnel =
+        let
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux"; 
+            config.allowUnfree = true;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "start-tailscale-funnel" ''
+            set -euo pipefail
+
+            # Load environment variables if .env exists
+            if [ -f .env ]; then
+              set -a; source .env; set +a
+            fi
+
+            REGISTRY_PORT=''${NEKO_REGISTRY_PORT:-5000}
+
+            echo "🌐 Starting Tailscale Funnel for Registry"
+            echo "=========================================="
+            echo "Local port: $REGISTRY_PORT"
+            echo ""
+
+            # Check if tailscale is available
+            if ! command -v tailscale &> /dev/null; then
+              echo "❌ Tailscale CLI not available."
+              echo "   Please install Tailscale and ensure you're logged in."
+              echo "   Visit: https://tailscale.com/download"
+              exit 1
+            fi
+
+            # Check if authenticated
+            if ! tailscale status >/dev/null 2>&1; then
+              echo "❌ Not authenticated with Tailscale."
+              echo "   Please run: tailscale up"
+              exit 1
+            fi
+
+            # Check if registry is running
+            REGISTRY_USER=''${NEKO_REGISTRY_USER:-neko}
+            REGISTRY_PASSWORD=''${NEKO_REGISTRY_PASSWORD:-pushme}
+            if ! curl -sf -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "http://localhost:$REGISTRY_PORT/v2/_catalog" >/dev/null; then
+              echo "❌ Registry not running on port $REGISTRY_PORT"
+              echo "   Please run: nix run .#start-registry"
+              exit 1
+            fi
+
+            echo "🔍 Checking Tailscale Funnel availability..."
+            if ! tailscale funnel status >/dev/null 2>&1; then
+              echo "⚠️  Tailscale Funnel may not be available on your node."
+              echo "   Proceeding anyway..."
+            fi
+
+            echo "🚀 Starting Tailscale Funnel..."
+            echo "   This will make your registry available over HTTPS"
+            echo "   Press Ctrl+C to stop"
+            echo ""
+
+            # Get device name for display
+            DEVICE_NAME=$(tailscale status --json | ${pkgs-app.jq}/bin/jq -r '.Self.DNSName // "unknown"' | sed 's/\.$//')
+
+            echo "📋 Expected public URL: https://$DEVICE_NAME/"
+            echo "🔑 Authentication will be required (check .env or defaults)"
+            echo ""
+            echo "📤 Usage from another machine:"
+            echo "  docker login $DEVICE_NAME"
+            echo "  docker tag myimage $DEVICE_NAME/neko/myimage:latest"
+            echo "  docker push $DEVICE_NAME/neko/myimage:latest"
+            echo ""
+            echo "🎯 For deploy-to-tee:"
+            echo "  NEKO_REGISTRY=$DEVICE_NAME/neko nix run .#deploy-to-tee"
+            echo ""
+
+            # Start the funnel
+            exec tailscale funnel $REGISTRY_PORT
+          '');
+        };
+
+      apps.x86_64-linux.start-cloudflare-tunnel =
+        let
+          pkgs-app = import nixpkgs { 
+            system = "x86_64-linux"; 
+            config.allowUnfree = true;
+          };
+        in
+        {
+          type = "app";
+          program = toString (pkgs-app.writeShellScript "start-cloudflare-tunnel" ''
+            set -euo pipefail
+
+            # Load environment variables if .env exists
+            if [ -f .env ]; then
+              set -a; source .env; set +a
+            fi
+
+            REGISTRY_PORT=''${NEKO_REGISTRY_PORT:-5000}
+            TUNNEL_NAME=''${NEKO_CF_TUNNEL_NAME:-neko-registry}
+            HOSTNAME=''${NEKO_CF_HOSTNAME:-}
+
+            echo "☁️  Starting Cloudflare Tunnel for Registry"
+            echo "============================================"
+            echo "Local port: $REGISTRY_PORT"
+            echo "Tunnel name: $TUNNEL_NAME"
+            echo "Hostname: ''${HOSTNAME:-not set}"
+            echo ""
+
+            # Check if cloudflared is available
+            if ! command -v cloudflared &> /dev/null; then
+              echo "❌ Cloudflared not available."
+              echo "   Please install cloudflared:"
+              echo "   - Download from: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+              echo "   - Or use package manager (apt, brew, etc.)"
+              exit 1
+            fi
+
+            # Check if registry is running
+            REGISTRY_USER=''${NEKO_REGISTRY_USER:-neko}
+            REGISTRY_PASSWORD=''${NEKO_REGISTRY_PASSWORD:-pushme}
+            if ! curl -sf -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "http://localhost:$REGISTRY_PORT/v2/_catalog" >/dev/null; then
+              echo "❌ Registry not running on port $REGISTRY_PORT"
+              echo "   Please run: nix run .#start-registry"
+              exit 1
+            fi
+
+            if [ -z "$HOSTNAME" ]; then
+              echo "❌ NEKO_CF_HOSTNAME not set in .env file"
+              echo "   Please set your desired hostname (must be a domain you control in Cloudflare)"
+              echo "   Example: NEKO_CF_HOSTNAME=registry.example.com"
+              exit 1
+            fi
+
+            # Check if tunnel exists, create if not
+            echo "🔍 Checking for existing tunnel '$TUNNEL_NAME'..."
+            if ! cloudflared tunnel list | grep -q "$TUNNEL_NAME"; then
+              echo "🚇 Creating tunnel '$TUNNEL_NAME'..."
+              cloudflared tunnel create "$TUNNEL_NAME"
+            fi
+
+            # Get tunnel ID
+            TUNNEL_ID=$(cloudflared tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}')
+            echo "✅ Using tunnel ID: $TUNNEL_ID"
+
+            # Create config file
+            CONFIG_FILE="$HOME/.cloudflared/config.yml"
+            echo "📝 Creating/updating tunnel configuration..."
+            mkdir -p "$(dirname "$CONFIG_FILE")"
+            
+            cat > "$CONFIG_FILE" <<EOF
+tunnel: $TUNNEL_ID
+credentials-file: $HOME/.cloudflared/$TUNNEL_ID.json
+
+ingress:
+  - hostname: $HOSTNAME
+    service: http://localhost:$REGISTRY_PORT
+  - service: http_status:404
+EOF
+
+            echo "✅ Configuration written to: $CONFIG_FILE"
+
+            # Create DNS record (requires zone edit permissions)
+            echo "🌐 Creating DNS record (requires zone edit permissions)..."
+            if cloudflared tunnel route dns "$TUNNEL_NAME" "$HOSTNAME"; then
+              echo "✅ DNS record created for $HOSTNAME"
+            else
+              echo "⚠️  DNS record creation failed - you may need to create it manually"
+              echo "   Point $HOSTNAME to $TUNNEL_ID.cfargotunnel.com (CNAME)"
+            fi
+
+            echo ""
+            echo "📋 Public Registry Information:"
+            echo "  URL: https://$HOSTNAME"
+            echo "  API: https://$HOSTNAME/v2/_catalog"
+            echo ""
+            echo "🔑 Authentication required (check .env or defaults)"
+            echo ""
+            echo "📤 Usage from another machine:"
+            echo "  docker login $HOSTNAME"
+            echo "  docker tag myimage $HOSTNAME/neko/myimage:latest"
+            echo "  docker push $HOSTNAME/neko/myimage:latest"
+            echo ""
+            echo "🎯 For deploy-to-tee:"
+            echo "  NEKO_REGISTRY=$HOSTNAME/neko nix run .#deploy-to-tee"
+            echo ""
+            echo "🚀 Starting tunnel... Press Ctrl+C to stop"
+            echo ""
+
+            # Run the tunnel
+            exec cloudflared tunnel run "$TUNNEL_NAME"
+          '');
+        };
     };
 }
