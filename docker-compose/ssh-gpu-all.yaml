@@ -1,0 +1,45 @@
+# docker-compose.yaml (SSH with GPU access)
+x-common: &common-config
+  restart: always
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "100m"
+      max-file: "5"
+
+services:
+  ssh-server:
+    <<: *common-config
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      # override at deploy time; or remove if you use keys only
+      - ROOT_PW=change-me-now
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+        RUN apt-get update && apt-get install -y openssh-server sudo nvtop software-properties-common && rm -rf /var/lib/apt/lists/*
+        RUN add-apt-repository -y ppa:deadsnakes/ppa
+        RUN apt-get update && apt-get install -y python3.11 python3.11-venv python3.11-dev
+        RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+        ENV PATH="/root/.cargo/bin:${PATH}"
+        RUN mkdir /run/sshd
+        # root password (override with ROOT_PW env, but prefer keys!)
+        RUN echo 'root:${ROOT_PW:-123456}' | chpasswd
+        # enable root+password (for dev only)
+        RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+            sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+            sed -i 's/#Port 22/Port 1022/' /etc/ssh/sshd_config && \
+            sed -i "s@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@" -i /etc/pam.d/sshd
+        EXPOSE 1022
+        CMD ["/usr/sbin/sshd", "-D"]
+    container_name: sshd
+    privileged: true
+    ports:
+      - "1022:1022"
+    volumes:
+      # keep if you really need host access; otherwise delete these for safety
+      - /:/host/
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/docker.sock:/var/run/docker.sock
