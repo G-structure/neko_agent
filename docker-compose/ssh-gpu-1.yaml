@@ -43,3 +43,10 @@ services:
       - /:/host/
       - /var/run/tappd.sock:/var/run/tappd.sock
       - /var/run/docker.sock:/var/run/docker.sock
+
+  # optional example workload from your snippet
+  workload:
+    <<: *common-config
+    image: nginx:stable
+    ports:
+      - "8080:80"
