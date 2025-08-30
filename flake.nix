@@ -313,6 +313,10 @@
               echo "Installing Anthropic Claude CLI..."
               npm install -g @anthropic-ai/claude-code
             fi
+            if [ ! -x "$NPM_CONFIG_PREFIX/bin/gemini" ]; then
+              echo "Installing Google Gemini CLI..."
+              npm install --engine-strict -g @google/gemini-cli@latest
+            fi
           '';
 
           # CUDA env used by GPU shells
