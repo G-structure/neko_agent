@@ -142,7 +142,7 @@ docker-run-generic:
         -e NEKO_LOGLEVEL="${NEKO_LOGLEVEL:-INFO}" \
         neko-agent:cuda12.8-generic
 
-# Run optimized Docker image (requires NVIDIA Container Toolkit)  
+# Run optimized Docker image (requires NVIDIA Container Toolkit)
 docker-run-optimized:
     #!/usr/bin/env bash
     echo "Loading optimized CUDA image..."
@@ -158,6 +158,70 @@ docker-run-optimized:
 # Build all images using Nix app
 build-images:
     nix run .#build-images
+
+# === VMM GPU Management ===
+
+# List available GPUs using VMM CLI
+gpus:
+    #!/usr/bin/env bash
+    cd "{{justfile_directory()}}"
+    nix develop .#tee --command bash -c 'vmm-cli lsgpu'
+
+# Deploy application with VMM CLI
+# Usage: just deploy docker-compose.yml "0a:00.0 1a:00.0"
+# Usage: just deploy docker-compose.yml "0a:00.0"
+deploy-gpu compose_file gpus:
+    #!/usr/bin/env bash
+    cd "{{justfile_directory()}}"
+    compose_name=$(basename "{{compose_file}}" .yml | sed 's/\.yaml$//')
+    nix develop .#tee --command bash -c '\
+        vmm-cli compose \
+            --name "'$compose_name'" \
+            --docker-compose "{{compose_file}}" \
+            --gateway \
+            --kms \
+            --public-logs \
+            --public-sysinfo \
+            --output ./neko-app-compose.json && \
+        vmm-cli deploy \
+            --name "'$compose_name'-${USER:-unknown}" \
+            --image "dstack-nvidia-dev-0.5.3" \
+            --compose ./neko-app-compose.json \
+            --vcpu 12 \
+            --memory 64G \
+            --disk 100G \
+            $(echo "{{gpus}}" | tr " " "\n" | sed "s/^/--gpu /" | tr "\n" " ")'
+
+deploy compose_file:
+    #!/usr/bin/env bash
+    cd "{{justfile_directory()}}"
+    compose_name=$(basename "{{compose_file}}" .yml | sed 's/\.yaml$//')
+    nix develop .#tee --command bash -c '\
+        vmm-cli compose \
+            --name "'$compose_name'" \
+            --docker-compose "{{compose_file}}" \
+            --gateway \
+            --kms \
+            --public-logs \
+            --public-sysinfo \
+            --output ./temp-neko-app-compose.json && \
+        vmm-cli deploy \
+            --name "'$compose_name'-${USER:-unknown}" \
+            --image "dstack-nvidia-dev-0.5.3" \
+            --compose ./temp-neko-app-compose.json \
+            --vcpu 2 \
+            --memory 8G \
+            --disk 10G'
+
+# Connect to deployed VM via SSH using App ID
+# Usage: just connect aa7d1365f90c90ac2be2ac6139237afab9154611
+connect app_id:
+    #!/usr/bin/env bash
+    ssh -vvv -o HostName={{app_id}}-1022.h200-dstack-01.phala.network \
+        -o "ProxyCommand=openssl s_client -servername %h -quiet -connect %h:11354" \
+        -o ControlMaster=no \
+        -o ControlPath=none \
+        -p 22 root@my-tee-box
 
 # === Finetuning ===
 
@@ -176,3 +240,10 @@ uv-train:
     cd "{{justfile_directory()}}"
     if [ -f .env ]; then set -a; source .env; set +a; fi
     uv run src/train.py
+
+# Docker cleanup
+docker-clean:
+    #!/usr/bin/env bash
+    docker image prune -a -f
+    docker container prune -f
+    docker builder prune -a -f

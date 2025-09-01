@@ -19,6 +19,7 @@ services:
       context: .
       dockerfile_inline: |
         FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+        ENV DEBIAN_FRONTEND=noninteractive
         RUN apt-get update && apt-get install -y openssh-server sudo nvtop software-properties-common && rm -rf /var/lib/apt/lists/*
         RUN add-apt-repository -y ppa:deadsnakes/ppa
         RUN apt-get update && apt-get install -y python3.11 python3.11-venv python3.11-dev

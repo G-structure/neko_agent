@@ -228,7 +228,10 @@
         extraPackages ? [],
         config ? {},
         registry ? registryConfig.defaultRegistry,
-        ttl ? null
+        ttl ? null,
+        gpu ? false,  # Enable GPU support for this container
+        gpuCount ? "all",  # Number of GPUs to request
+        gpuCapabilities ? ["gpu"]  # GPU capabilities needed
       }:
         let
           registryConf = registryConfig.getRegistryConfig registry;
@@ -275,6 +278,9 @@
           Labels = buildInfo.imageMetadata // {
             "dev.neko.variant" = variant;
             "dev.neko.binary" = runner.name or "neko-agent";
+            "dev.neko.gpu.enabled" = if gpu then "true" else "false";
+            "dev.neko.gpu.count" = toString gpuCount;
+            "dev.neko.gpu.capabilities" = builtins.concatStringsSep "," gpuCapabilities;
           } // (config.Labels or {});
         } // (builtins.removeAttrs config ["Env" "Labels"]);
       };
@@ -719,6 +725,8 @@ PY
             variant = "generic";
             runner = runnerGeneric;
             pyEnv = pyEnvGeneric;
+            gpu = true;
+            gpuCount = "all";
             config.Env = [
               "TORCH_CUDA_ARCH_LIST=8.6+PTX"
             ];
@@ -729,6 +737,8 @@ PY
             variant = "opt";
             runner = runnerOpt;
             pyEnv = pyEnvOpt;
+            gpu = true;
+            gpuCount = "all";
             extraPackages = [
               (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
             ];
@@ -747,6 +757,8 @@ PY
             variant = "generic";
             runner = captureRunnerGeneric;
             pyEnv = pyEnvGeneric;
+            gpu = false;
+            gpuCount = "all";
             config.Env = [
               "TORCH_CUDA_ARCH_LIST=8.6+PTX"
             ];
@@ -757,6 +769,8 @@ PY
             variant = "opt";
             runner = captureRunnerOpt;
             pyEnv = pyEnvOpt;
+            gpu = false;
+            gpuCount = "all";
             extraPackages = [
               (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
             ];
@@ -775,6 +789,8 @@ PY
             variant = "generic";
             runner = yapRunnerGeneric;
             pyEnv = pyEnvGeneric;
+            gpu = true;
+            gpuCount = "all";
             config.Env = [
               "TORCH_CUDA_ARCH_LIST=8.6+PTX"
             ];
@@ -785,6 +801,8 @@ PY
             variant = "opt";
             runner = yapRunnerOpt;
             pyEnv = pyEnvOpt;
+            gpu = true;
+            gpuCount = "all";
             extraPackages = [
               (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
             ];
@@ -803,6 +821,8 @@ PY
             variant = "generic";
             runner = trainRunnerGeneric;
             pyEnv = pyEnvGeneric;
+            gpu = true;
+            gpuCount = "all";
             config.Env = [
               "TORCH_CUDA_ARCH_LIST=8.6+PTX"
             ];
@@ -813,6 +833,8 @@ PY
             variant = "opt";
             runner = trainRunnerOpt;
             pyEnv = pyEnvOpt;
+            gpu = true;
+            gpuCount = "all";
             extraPackages = [
               (pkgs.writeShellScriptBin "neko-znver2-env" "source ${pkgs.nekoZnver2Env}; exec \"$@\"")
             ];
@@ -884,11 +906,13 @@ PY
             REGISTRY=''${NEKO_REGISTRY:-ghcr.io/your-org}
             TTL=''${NEKO_TTL:-}
             PUSH_IMAGE=''${NEKO_PUSH:-true}
+            VARIANT=''${NEKO_VARIANT:-generic}  # generic (CPU) or opt (GPU)
 
             echo "🔐 Neko TEE Deployment (Attestation-Ready)"
             echo "=========================================="
             echo "Build: ${buildInfo.version} (${buildInfo.timestamp})"
             echo "Registry: $REGISTRY"
+            echo "Variant: $VARIANT"
             echo "VMM URL: ''${DSTACK_VMM_URL:-not set}"
             echo ""
 
@@ -959,8 +983,13 @@ PY
 
             # Step 1: Build reproducible images
             echo "📦 Building reproducible images..."
-            nix build .#neko-agent-docker-generic
-            nix build .#neko-agent-docker-opt
+            if [ "$VARIANT" = "opt" ]; then
+              echo "🎮 Building GPU-optimized variant..."
+              nix build .#neko-agent-docker-opt
+            else
+              echo "🖥️  Building CPU-generic variant..."
+              nix build .#neko-agent-docker-generic
+            fi
 
             # Step 2: Load and get actual digests
             echo "🔍 Loading images and extracting digests..."
@@ -972,8 +1001,18 @@ PY
             GENERIC_IMAGE=$(docker load < result | grep "Loaded image" | cut -d' ' -f3)
             GENERIC_DIGEST=$(docker inspect "$GENERIC_IMAGE" --format='{{index .Id}}')
 
+            # Extract GPU metadata from image labels
+            GPU_ENABLED=$(docker inspect "$GENERIC_IMAGE" --format='{{index .Config.Labels "dev.neko.gpu.enabled"}}' 2>/dev/null || echo "false")
+            GPU_COUNT=$(docker inspect "$GENERIC_IMAGE" --format='{{index .Config.Labels "dev.neko.gpu.count"}}' 2>/dev/null || echo "all")
+            GPU_CAPABILITIES=$(docker inspect "$GENERIC_IMAGE" --format='{{index .Config.Labels "dev.neko.gpu.capabilities"}}' 2>/dev/null || echo "gpu")
+
             echo "✅ Generic image: $GENERIC_IMAGE"
             echo "✅ Image digest: $GENERIC_DIGEST"
+            echo "🎮 GPU enabled: $GPU_ENABLED"
+            if [ "$GPU_ENABLED" = "true" ]; then
+              echo "🎮 GPU count: $GPU_COUNT"
+              echo "🎮 GPU capabilities: $GPU_CAPABILITIES"
+            fi
 
             # Update DEPLOY_IMAGE_NAME to use the correct registry-based name when push fails
             DEPLOY_IMAGE_NAME="$IMAGE_NAME"
@@ -1032,16 +1071,27 @@ PY
               echo "📌 Using tag reference: $FINAL_IMAGE_REF"
             fi
 
+            # Generate GPU configuration if enabled
+            GPU_CONFIG=""
+            GPU_ENV=""
+            if [ "$GPU_ENABLED" = "true" ]; then
+              GPU_CONFIG="    runtime: nvidia"
+              GPU_ENV="      - NVIDIA_VISIBLE_DEVICES=$GPU_COUNT
+      - NVIDIA_DRIVER_CAPABILITIES=$GPU_CAPABILITIES"
+            fi
+
             COMPOSE_CONTENT=$(cat <<EOF
 version: '3.8'
 services:
   neko-agent:
     image: $FINAL_IMAGE_REF
     restart: unless-stopped
+$GPU_CONFIG
     environment:
       - NEKO_LOGLEVEL=INFO
       - NEKO_BUILD_VERSION=${buildInfo.version}
       - NEKO_REGISTRY=$REGISTRY
+$GPU_ENV
     ports:
       - "8080:8080"
     volumes:
@@ -1077,7 +1127,12 @@ EOF
   "image_ref": "$FINAL_IMAGE_REF",
   "registry": "$REGISTRY",
   "nix_revision": "${buildInfo.revision}",
-  "reproducible": true
+  "reproducible": true,
+  "gpu": {
+    "enabled": $GPU_ENABLED,
+    "count": "$GPU_COUNT",
+    "capabilities": "$GPU_CAPABILITIES"
+  }
 }
 EOF
 
@@ -1099,13 +1154,38 @@ EOF
             APP_ID=$(echo -n "$COMPOSE_HASH" | cut -c1-40)
             echo "App ID: $APP_ID"
 
-            if ${pkgs-app.vmm-cli}/bin/vmm-cli deploy \
-              --name "neko-reproducible-''${USER:-unknown}" \
-              --image "dstack-nvidia-0.5.3" \
-              --compose ./neko-app-compose.json \
-              --vcpu 4 \
-              --memory 8G \
-              --disk 50G; then
+            # Build vmm-cli command with conditional GPU allocation
+            VMM_CMD="${pkgs-app.vmm-cli}/bin/vmm-cli deploy"
+            VMM_CMD="$VMM_CMD --name neko-reproducible-''${USER:-unknown}"
+            VMM_CMD="$VMM_CMD --image dstack-nvidia-0.5.3"
+            VMM_CMD="$VMM_CMD --compose ./neko-app-compose.json"
+            VMM_CMD="$VMM_CMD --vcpu 4"
+            VMM_CMD="$VMM_CMD --memory 8G"
+            VMM_CMD="$VMM_CMD --disk 50G"
+            VMM_CMD="$VMM_CMD --gateway"
+            VMM_CMD="$VMM_CMD --kms" 
+            VMM_CMD="$VMM_CMD --public-logs"
+            VMM_CMD="$VMM_CMD --public-sysinfo"
+            
+            # Add GPU allocation if container requires GPU
+            if [ "$GPU_ENABLED" = "true" ]; then
+              GPU_MODE=''${NEKO_GPU_MODE:-ppcie}  # ppcie (all GPUs) or specific
+              if [ "$GPU_MODE" = "ppcie" ]; then
+                VMM_CMD="$VMM_CMD --ppcie"
+                echo "🎮 GPU Mode: PPCIE - all available GPUs"
+              else
+                # Use specific GPU assignment - user can override via NEKO_GPU_SLOTS
+                GPU_SLOTS=''${NEKO_GPU_SLOTS:-0a:00.0}
+                for slot in $GPU_SLOTS; do
+                  VMM_CMD="$VMM_CMD --gpu $slot"
+                done
+                echo "🎮 GPU Mode: Specific slots - $GPU_SLOTS"
+              fi
+            fi
+            
+            echo "🚀 VMM Command: $VMM_CMD"
+            
+            if eval "$VMM_CMD"; then
                 echo "🎉 Deployment complete!"
             else
                 echo "⚠️  vmm-cli deployment failed. Generated files for manual deployment:"
@@ -1118,12 +1198,18 @@ EOF
             echo "   Compose hash: $COMPOSE_HASH"
             echo "   This hash will be recorded in RTMR3 for verification"
             echo ""
-            echo "🎯 Registry Usage Examples:"
-            echo "   ttl.sh (1h):     NEKO_REGISTRY=ttl.sh NEKO_TTL=1h nix run .#deploy-to-tee"
-            echo "   ttl.sh (24h):    NEKO_REGISTRY=ttl.sh NEKO_TTL=24h nix run .#deploy-to-tee"
-            echo "   GitHub:          NEKO_REGISTRY=ghcr.io/your-org nix run .#deploy-to-tee"
-            echo "   Docker Hub:      NEKO_REGISTRY=docker.io/your-org nix run .#deploy-to-tee"
-            echo "   Local registry:  NEKO_REGISTRY=localhost:5000/neko nix run .#deploy-to-tee"
+            echo "🎯 Usage Examples:"
+            echo "   CPU default:        nix run .#deploy-to-tee"
+            echo "   GPU all GPUs:       NEKO_VARIANT=opt nix run .#deploy-to-tee"
+            echo '   GPU specific:       NEKO_VARIANT=opt NEKO_GPU_MODE=specific NEKO_GPU_SLOTS="0a:00.0 1a:00.0" nix run .#deploy-to-tee'
+            echo "   ttl.sh + GPU:       NEKO_REGISTRY=ttl.sh NEKO_VARIANT=opt nix run .#deploy-to-tee"
+            echo "   Custom registry:    NEKO_REGISTRY=ghcr.io/your-org NEKO_VARIANT=opt nix run .#deploy-to-tee"
+            echo ""
+            echo "🎮 GPU Configuration:"
+            echo "   NEKO_GPU_MODE=ppcie     - Use all available GPUs - default for GPU-enabled containers"
+            echo "   NEKO_GPU_MODE=specific  - Use specific GPU slots"
+            echo '   NEKO_GPU_SLOTS="0a:00.0 1a:00.0"  - Specify GPU slots - requires specific mode'
+            echo "   Run 'vmm-cli lsgpu' to see available GPU slots"
           '');
         };
 
