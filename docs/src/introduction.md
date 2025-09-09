@@ -14,6 +14,8 @@ Neko Agent is a Python-based automation system that:
 
 ## Key Components
 
+- **`src/neko/`** - Shared library with configuration, logging, WebSocket signaling,
+  WebRTC helpers and small utility modules
 - **`src/agent.py`** - Core automation agent with WebRTC integration
 - **`src/capture.py`** - Training data capture service using MosaicML Streaming
 - **`src/yap.py`** - Text-to-speech service with F5-TTS and voice management
