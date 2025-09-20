@@ -17,9 +17,9 @@ command = "mdbook-mermaid"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/your-org/neko-agent"
-edit-url-template = "https://github.com/your-org/neko-agent/edit/main/docs/src/{path}"
-site-url = "/neko-agent/"
+git-repository-url = "https://github.com/G-structure/neko_agent"
+edit-url-template = "https://github.com/G-structure/neko_agent/edit/main/docs/src/{path}"
+site-url = "/neko_agent/"
 
 [output.html.search]
 enable = true
