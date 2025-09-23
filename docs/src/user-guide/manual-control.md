@@ -10,17 +10,12 @@ The Manual Control CLI is an interactive tool that lets you remotely control any
 - Access to a Neko server (either local or hosted)
 - Network connectivity to the Neko server
 
-### Installation
+### Launching the CLI
 
-The manual control tool is included with the Neko Agent package:
+The manual control tool ships as `src/manual.py` inside this repository. From a Nix shell you can run:
 
 ```bash
-# If you have the project locally
-cd /path/to/neko_agent_private
-python src/manual.py --help
-
-# Or if installed as a package
-neko-manual --help
+uv run src/manual.py --help
 ```
 
 ### First Connection
@@ -28,7 +23,7 @@ neko-manual --help
 The easiest way to connect is using your Neko server credentials:
 
 ```bash
-python src/manual.py \
+uv run src/manual.py \
   --neko-url "https://your-neko-server.com" \
   --username "your-username" \
   --password "your-password"
@@ -97,13 +92,24 @@ neko> scroll left 2
 neko> swipe 100 100 300 300
 ```
 
-### Coordinate Systems
+### CLI switches
 
-By default, the tool uses pixel coordinates based on your screen resolution. You can also use normalized coordinates (0.0 to 1.0) for resolution-independent control:
+`manual.py` mirrors the agent’s authentication behaviour: provide either a full WebSocket URL (`--ws`) or REST credentials (`--neko-url`, `--username`, `--password`). Additional flags include:
+
+| Flag | Purpose |
+|------|---------|
+| `--norm` | Interpret coordinates as 0.0–1.0 floats instead of pixels |
+| `--size 1920x1080` | Override the reported screen size when using pixel coordinates |
+| `--no-auto-host` | Do not automatically request host control on connect |
+| `--no-media` | Skip WebRTC negotiation (only for debugging signalling) |
+| `--no-audio` | Disable audio subscription |
+
+By default the CLI learns the keyboard layout advertised by the server and stores logs under `NEKO_LOGFILE` if that environment variable is set.
+
+#### Normalised coordinates example
 
 ```bash
-# Start with normalized coordinates
-python src/manual.py --norm \
+uv run src/manual.py --norm \
   --neko-url "https://your-server.com" \
   --username "admin" --password "secret"
 
@@ -260,14 +266,15 @@ export NEKO_PASS="your-password"
 export NEKO_SIZE="1920x1080"
 
 # Now you can just run:
-python src/manual.py
+uv run src/manual.py
 ```
 
 ### Command Line Options
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--neko-url` | Neko server URL | `https://neko.example.com` |
+| `--ws` | Direct WebSocket URL | `wss://neko.example.com/api/ws?token=...` |
+| `--neko-url` | Neko server URL (for REST login) | `https://neko.example.com` |
 | `--username` | Login username | `admin` |
 | `--password` | Login password | `secretpass` |
 | `--norm` | Use 0-1 coordinates | (flag only) |
@@ -283,7 +290,7 @@ Enable detailed logging for troubleshooting:
 ```bash
 export NEKO_LOGLEVEL="DEBUG"
 export NEKO_LOGFILE="/tmp/neko-manual.log"
-python src/manual.py --neko-url "..." --username "..." --password "..."
+uv run src/manual.py --neko-url "..." --username "..." --password "..."
 
 # In another terminal, watch the logs:
 tail -f /tmp/neko-manual.log
@@ -297,7 +304,7 @@ For automation scripts, you may need to add delays between actions:
 
 ```bash
 # The tool doesn't have built-in delays, but you can use shell scripting:
-echo -e "tap 300 200\ntext hello\nkey Enter" | python src/manual.py --neko-url "..." --username "..." --password "..."
+echo -e "tap 300 200\ntext hello\nkey Enter" | uv run src/manual.py --neko-url "..." --username "..." --password "..."
 ```
 
 ### Screen Resolution
@@ -351,7 +358,7 @@ export NEKO_PASS="password"
     echo "key Tab"                      # Next field
     echo "text testpass"                # Password  
     echo "key Enter"                    # Submit
-} | python src/manual.py
+} | uv run src/manual.py
 ```
 
 ## Troubleshooting

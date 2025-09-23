@@ -16,64 +16,74 @@ Neko Agent is a Python-based automation system that:
 
 ### Prerequisites
 
-- **Nix with flakes enabled** - for development environment
-- **NVIDIA GPU** (optional) - for optimal AI model performance
+- **Nix with flakes enabled** for the reproducible development shells
+- **NVIDIA GPU** (optional) for fast inference – the agent will fall back to CPU/MPS automatically
 
-### Setup Development Environment
+### Prepare your environment
 
 ```bash
-# GPU-accelerated environment (recommended)
-nix develop .#gpu
+# Copy the sample environment and fill in your credentials
+cp .env.example .env
+$EDITOR .env
 
-# Basic CPU environment
-nix develop
-
-# Documentation environment
-nix develop .#docs
+# Enter a development shell (choose the one that fits your hardware)
+nix develop            # Default CPU shell
+# nix develop .#gpu    # CUDA-enabled shell
 ```
 
-### Start Neko Server
+The flake also exposes additional shells when needed:
+
+| Shell | Purpose |
+|-------|---------|
+| `default` | Standard CPU-oriented development |
+| `gpu` | CUDA 12.8 stack with binary PyTorch |
+| `ai` | Adds common CLI tools (codex/claude/gemini) on top of the default shell |
+| `neko` | Bundles Docker Compose helpers (`neko-services`) for the reference server |
+| `cpu-opt` | Builds Python packages with `znver2` optimisations |
+| `gpu-opt` | CUDA + `znver2` tuned builds |
+| `docs` | mdBook + linkcheck stack for documentation work |
+| `tee` | Tooling for the trusted execution environment pipeline |
+
+### Start a Neko server (optional)
 
 ```bash
-# Using included Docker Compose
 nix develop .#neko
 neko-services up
-
-# View at http://localhost:8080
+# The reference stack listens on http://localhost:8080
 ```
 
-### Run the Agent
+### Run the agent
 
 ```bash
 # Basic usage
-python src/agent.py --task "Navigate to google.com and search for 'AI automation'"
+uv run src/agent.py --task "Navigate to google.com and search for 'AI automation'"
 
-# With custom configuration
-python src/agent.py \
+# REST login flow (the agent will mint a WebSocket token)
+uv run src/agent.py \
   --task "Your automation task" \
-  --max-steps 20 \
   --neko-url "http://localhost:8080" \
-  --neko-user "user" \
-  --neko-pass "password"
+  --username "user" \
+  --password "password"
+
+# Stay online and receive new tasks from chat
+uv run src/agent.py --online --neko-url "http://localhost:8080" --username user --password password
+
+# Health-check the configuration without starting the session
+uv run src/agent.py --healthcheck
 ```
 
-### Using Just Commands
+If you prefer `python` over `uv`, the commands work the same – the scripts have no side effects at import time.
+
+### Helpful `just` targets
+
+The repository includes a `justfile` with shortcuts. The commands assume you have customised paths (for example `NEKO_LOGFILE`) to match your machine.
 
 ```bash
-# Start agent with default task
-just agent
-
-# Start agent with custom task
-just agent-task "search for pics of cats"
-
-# Manual control mode
-just manual
-
-# View logs
-just log
-
-# Clean up
-just clean
+just uv-agent               # Load .env and run the agent via uv
+just agent-task "look up cats"  # Fire-and-forget example task (edit paths first!)
+just manual                 # Launch the manual REPL controller
+just kill-all               # Stop leftover automation processes
+just docker-build-generic   # Build the portable Docker image via Nix
 ```
 
 ## Core Components
@@ -89,6 +99,7 @@ just clean
 | Shell | Purpose | Features |
 |-------|---------|----------|
 | `default` | Basic development | PyTorch CPU, Python deps |
+| `ai` | Extended tooling | Adds Codex/Claude/Gemini CLI utilities |
 | `gpu` | GPU development | CUDA 12.8, GPU-accelerated PyTorch |
 | `cpu-opt` | CPU optimized | Znver2 compiler flags |
 | `gpu-opt` | GPU optimized | Znver2 + CUDA sm_86 |
@@ -168,13 +179,13 @@ Enable automatic training data capture:
 
 ```bash
 # Terminal 1: Start capture service
-python src/capture.py
+uv run src/capture.py
 
-# Terminal 2: Run agent (capture will automatically record)
-python src/agent.py --task "Your task description"
+# Terminal 2: Run the agent (capture will automatically observe chat + frames)
+uv run src/agent.py --task "Your task description"
 
 # Train on collected data
-just train
+uv run src/train.py
 ```
 
 ## Voice Output
@@ -182,16 +193,18 @@ just train
 Enable voice feedback during automation:
 
 ```bash
-# Terminal 1: Start TTS service
-python src/yap.py
+# Terminal 1: Start TTS service (uses F5-TTS)
+uv run src/yap.py
 
-# Terminal 2: Run agent with voice announcements
-python src/agent.py --task "Your task" --enable-voice
+# Terminal 2: Run the agent – audio is enabled by default (set NEKO_AUDIO=0 to disable)
+uv run src/agent.py --task "Narrate what you see"
 ```
+
+The agent streams audio from the Neko session; YAP injects synthesised speech over the same WebRTC connection when it sees `/yap` chat commands.
 
 ## Configuration
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (see `.env.example` for the exhaustive list):
 
 ```bash
 # Neko server connection
@@ -199,10 +212,20 @@ NEKO_URL=http://localhost:8080
 NEKO_USER=user
 NEKO_PASS=password
 
-# Agent settings
-AGENT_LOGLEVEL=INFO
-AGENT_MAX_STEPS=15
-AGENT_TIMEOUT=300
+# Agent behaviour
+NEKO_TASK="Search the weather"
+NEKO_MODE=web               # web | phone
+NEKO_MAX_STEPS=8
+NEKO_AUDIO=1                # 0 disables audio negotiation
+REFINEMENT_STEPS=5
+NEKO_RTCP_KEEPALIVE=0
+NEKO_FORCE_EXIT_GUARD_MS=0
+NEKO_SKIP_INITIAL_FRAMES=5
+NEKO_LOGLEVEL=INFO
+NEKO_LOG_FORMAT=text        # text | json
+NEKO_METRICS_PORT=9000
+# FRAME_SAVE_PATH="./tmp/frame.png"   # optional last-frame snapshot (relative paths land in /tmp/neko-agent)
+# CLICK_SAVE_PATH="./tmp/actions"     # optional directory for annotated frames
 
 # GPU configuration
 CUDA_VISIBLE_DEVICES=0
@@ -218,6 +241,7 @@ CAPTURE_REMOTE=s3://your-bucket/training-data
 YAP_VOICES_DIR=./voices
 YAP_SR=48000
 YAP_PARALLEL=2
+YAP_MAX_CHARS=350
 ```
 
 ## Documentation
@@ -257,13 +281,13 @@ Test your setup:
 python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 
 # Test agent connection
-python src/agent.py --help
+uv run src/agent.py --healthcheck
 
 # Show running processes
 just ps
 
-# View system status
-just status
+# Inspect the bundled Neko stack (from the `neko` shell)
+neko-services status
 ```
 
 ## Architecture
@@ -296,8 +320,26 @@ All container images are built with reproducible timestamps and include attestat
 
 See LICENSE file for details.
 
+## Metrics
+
+Prometheus metrics are exposed on `NEKO_METRICS_PORT` (or `$PORT` when running on hosting platforms):
+
+- `neko_frames_received_total`
+- `neko_actions_executed_total{action_type="..."}`
+- `neko_parse_errors_total`
+- `neko_navigation_steps_total`
+- `neko_inference_latency_seconds`
+- `neko_resize_duration_seconds`
+- `neko_reconnects_total`
+
+Scrape them with:
+
+```bash
+curl http://localhost:${NEKO_METRICS_PORT:-9000}/metrics
+```
+
 ## Support
 
-- Documentation: Run `nix run .#docs-serve`
+- Documentation: `nix run .#docs-serve`
 - Issues: Open an issue on the repository
-- Development: Use `nix develop .#gpu` for the full environment
+- Development: `nix develop .#gpu` for the full CUDA-enabled environment

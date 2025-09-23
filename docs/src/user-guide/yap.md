@@ -29,7 +29,7 @@ export NEKO_URL="http://localhost:8080"
 export NEKO_USER="user" 
 export NEKO_PASS="password"
 
-python src/yap.py
+uv run src/yap.py
 ```
 
 You should see:
@@ -238,10 +238,10 @@ Start YAP alongside your automation agent:
 
 ```bash
 # Terminal 1: Start YAP
-python src/yap.py
+uv run src/yap.py
 
-# Terminal 2: Run automation with voice
-python src/agent.py --task "Fill out contact form" --enable-voice
+# Terminal 2: Run automation with voice (audio is enabled by default)
+uv run src/agent.py --task "Fill out contact form"
 ```
 
 The agent can announce progress:
@@ -257,7 +257,7 @@ Use YAP for live interaction during manual control:
 
 ```bash
 # Terminal 1: Start YAP
-python src/yap.py
+uv run src/yap.py
 
 # Terminal 2: Manual control
 python src/manual.py
@@ -305,7 +305,7 @@ Set up different voices for different purposes:
 
 **Test connection:**
 ```bash
-python src/yap.py --healthcheck
+uv run src/yap.py --healthcheck
 ```
 
 ### Poor Audio Quality
@@ -374,7 +374,7 @@ Enable detailed logging:
 ```bash
 export YAP_LOGLEVEL=DEBUG
 export YAP_LOG_FORMAT=json
-python src/yap.py 2>&1 | jq .
+uv run src/yap.py 2>&1 | jq .
 ```
 
 Look for:

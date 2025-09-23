@@ -15,13 +15,13 @@ The agent uses the ShowUI-2B vision-language model to:
 ### Basic Command
 
 ```bash
-python src/agent.py --task "Search for weather in Tokyo"
+uv run src/agent.py --task "Search for weather in Tokyo"
 ```
 
 ### With Neko Server Connection
 
 ```bash
-python src/agent.py \
+uv run src/agent.py \
   --task "Navigate to GitHub and search for Python projects" \
   --neko-url "http://localhost:8080" \
   --username "user" \
@@ -31,7 +31,7 @@ python src/agent.py \
 ### Keep Agent Running (Online Mode)
 
 ```bash
-python src/agent.py \
+uv run src/agent.py \
   --task "Check email" \
   --online
 ```
@@ -59,16 +59,16 @@ python src/agent.py \
 |--------|---------------------|---------|-------------|
 | `--mode` | `NEKO_MODE` | `web` | Interface mode: `web` or `phone` |
 | `--max-steps` | `NEKO_MAX_STEPS` | `8` | Maximum automation steps before stopping |
-| `--online` | `NEKO_ONLINE` | `false` | Keep running after task completion |
-| `--no-audio` | `NEKO_AUDIO` | `true` | Disable audio stream from Neko |
+| `--online` | – | `false` | Keep running after task completion; ignores the initial task |
+| `--no-audio` | `NEKO_AUDIO=0` | `1` | Disable audio negotiation with the Neko server |
 
 ### Technical Options
 
 | Option | Environment Variable | Default | Description |
 |--------|---------------------|---------|-------------|
 | `--metrics-port` | `NEKO_METRICS_PORT`/`PORT` | `9000` | Prometheus metrics server port |
-| `--loglevel` | `NEKO_LOGLEVEL` | `INFO` | Logging level (DEBUG, INFO, WARN, ERROR) |
-| `--healthcheck` | - | - | Validate configuration and exit |
+| `--loglevel` | `NEKO_LOGLEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
+| `--healthcheck` | – | – | Validate configuration and exit |
 
 ## Usage Patterns
 
@@ -77,7 +77,7 @@ python src/agent.py \
 Run one task and exit when complete:
 
 ```bash
-python src/agent.py --task "Book a flight from NYC to LAX"
+uv run src/agent.py --task "Book a flight from NYC to LAX"
 ```
 
 ### Continuous Operation
@@ -85,7 +85,7 @@ python src/agent.py --task "Book a flight from NYC to LAX"
 Stay online to handle multiple tasks via chat interface:
 
 ```bash
-python src/agent.py --task "Ready for commands" --online
+uv run src/agent.py --task "Ready for commands" --online
 ```
 
 In online mode, send new tasks through the Neko chat interface.
@@ -95,7 +95,7 @@ In online mode, send new tasks through the Neko chat interface.
 Switch to mobile interface mode:
 
 ```bash
-python src/agent.py \
+uv run src/agent.py \
   --mode phone \
   --task "Open Instagram and check notifications"
 ```
@@ -105,7 +105,7 @@ python src/agent.py \
 Skip REST login with direct WebSocket URL:
 
 ```bash
-python src/agent.py \
+uv run src/agent.py \
   --ws "wss://neko.example.com/api/ws?token=your-token" \
   --task "Your automation task"
 ```
@@ -115,11 +115,10 @@ python src/agent.py \
 ### Core Settings
 
 ```bash
-# Task and behavior
+# Task and behaviour
 export NEKO_TASK="Default task description"
 export NEKO_MODE="web"  # or "phone"
-export NEKO_MAX_STEPS="15"
-export NEKO_ONLINE="false"
+export NEKO_MAX_STEPS="8"
 
 # Connection
 export NEKO_URL="http://localhost:8080"
@@ -128,27 +127,38 @@ export NEKO_PASS="password"
 export NEKO_WS="wss://direct.websocket.url/api/ws?token=..."
 
 # Technical
+export NEKO_AUDIO="1"
 export NEKO_LOGLEVEL="INFO"
+export NEKO_LOG_FORMAT="text"
 export NEKO_METRICS_PORT="9000"
-export NEKO_AUDIO="true"
+export NEKO_RTCP_KEEPALIVE="0"
+export NEKO_FORCE_EXIT_GUARD_MS="0"
+export NEKO_SKIP_INITIAL_FRAMES="5"
+# FRAME_SAVE_PATH="./tmp/frame.png"
+# CLICK_SAVE_PATH="./tmp/actions"
 ```
 
 ### Advanced Configuration
 
 ```bash
 # Model settings
-export NEKO_REPO_ID="Qwen/Qwen2-VL-2B-Instruct"
-export NEKO_SIZE_SHORTEST_EDGE="768"
-export NEKO_SIZE_LONGEST_EDGE="1280"
+export REPO_ID="showlab/ShowUI-2B"
+export SIZE_SHORTEST_EDGE="224"
+export SIZE_LONGEST_EDGE="1344"
+export OFFLOAD_FOLDER="./offload"  # used for MPS offloading
 
 # Network tuning
-export NEKO_WS_TIMEOUT="30"
-export NEKO_ICE_TIMEOUT="10"
+export NEKO_ICE_POLICY="strict"       # or "all" for permissive ICE gathering
+export NEKO_STUN_URL="stun:stun.l.google.com:19302"
+# export NEKO_TURN_URL="turn:turn.example.com:3478"
+# export NEKO_TURN_USER="..."
+# export NEKO_TURN_PASS="..."
 export NEKO_RTCP_KEEPALIVE="1"
 
 # Performance
+export REFINEMENT_STEPS="5"
 export NEKO_FORCE_EXIT_GUARD_MS="5000"
-export NEKO_LOG_FORMAT="json"  # or "text"
+export NEKO_LOG_FORMAT="json"        # or "text"
 ```
 
 ## Task Examples
@@ -157,33 +167,33 @@ export NEKO_LOG_FORMAT="json"  # or "text"
 
 ```bash
 # E-commerce
-python src/agent.py --task "Add wireless headphones to Amazon cart"
+uv run src/agent.py --task "Add wireless headphones to Amazon cart"
 
 # Information gathering
-python src/agent.py --task "Find the latest news about AI developments"
+uv run src/agent.py --task "Find the latest news about AI developments"
 
 # Form filling
-python src/agent.py --task "Fill out the contact form with test data"
+uv run src/agent.py --task "Fill out the contact form with test data"
 ```
 
 ### Social Media
 
 ```bash
 # Content creation
-python src/agent.py --task "Post a tweet about climate change"
+uv run src/agent.py --task "Post a tweet about climate change"
 
 # Engagement
-python src/agent.py --task "Like the latest 5 posts from my Twitter timeline"
+uv run src/agent.py --task "Like the latest 5 posts from my Twitter timeline"
 ```
 
 ### Productivity
 
 ```bash
 # Email management
-python src/agent.py --task "Check unread emails and summarize important ones"
+uv run src/agent.py --task "Check unread emails and summarize important ones"
 
 # Calendar scheduling
-python src/agent.py --task "Schedule a meeting for next Tuesday at 2pm"
+uv run src/agent.py --task "Schedule a meeting for next Tuesday at 2pm"
 ```
 
 ## Monitoring and Debugging
@@ -193,7 +203,7 @@ python src/agent.py --task "Schedule a meeting for next Tuesday at 2pm"
 Validate configuration without running tasks:
 
 ```bash
-python src/agent.py --healthcheck
+uv run src/agent.py --healthcheck
 ```
 
 ### Metrics
@@ -205,22 +215,25 @@ curl http://localhost:9000/metrics
 ```
 
 Key metrics:
-- `neko_agent_tasks_total` - Total tasks processed
-- `neko_agent_steps_total` - Total automation steps taken
-- `neko_agent_errors_total` - Total errors encountered
-- `neko_agent_inference_duration_seconds` - AI model inference time
+- `neko_frames_received_total` - Total video frames processed
+- `neko_actions_executed_total{action_type="..."}` - Actions emitted, labelled by type
+- `neko_parse_errors_total` - Count of action parsing failures
+- `neko_navigation_steps_total` - Steps taken while executing tasks
+- `neko_inference_latency_seconds` - Model inference latency histogram
+- `neko_resize_duration_seconds` - Time spent handling resize events
+- `neko_reconnects_total` - WebSocket reconnection attempts
 
 ### Debug Logging
 
 Enable detailed logging:
 
 ```bash
-python src/agent.py --loglevel DEBUG --task "Your task"
+uv run src/agent.py --loglevel DEBUG --task "Your task"
 ```
 
 ### Frame Capture
 
-Screenshots and interaction data are saved to `/tmp/neko-agent/` during execution for debugging.
+Set `FRAME_SAVE_PATH` or `CLICK_SAVE_PATH` to persist artefacts. Relative paths are resolved under `/tmp/neko-agent/`.
 
 ## Integration with Other Services
 
@@ -230,10 +243,10 @@ Run alongside capture service to collect training data:
 
 ```bash
 # Terminal 1: Start capture
-python src/capture.py
+uv run src/capture.py
 
 # Terminal 2: Run agent
-python src/agent.py --task "Navigate and interact for training"
+uv run src/agent.py --task "Navigate and interact for training"
 ```
 
 ### Voice Synthesis
@@ -242,10 +255,10 @@ Add voice feedback during automation:
 
 ```bash
 # Terminal 1: Start TTS service
-python src/yap.py
+uv run src/yap.py
 
 # Terminal 2: Run agent with voice
-python src/agent.py --task "Describe actions as you perform them"
+uv run src/agent.py --task "Describe actions as you perform them"
 ```
 
 ## Troubleshooting
@@ -258,13 +271,13 @@ python src/agent.py --task "Describe actions as you perform them"
 curl http://localhost:8080/health
 
 # Verify WebSocket endpoint
-python src/agent.py --healthcheck
+uv run src/agent.py --healthcheck
 ```
 
 **Authentication errors:**
 ```bash
 # Test REST login manually
-curl -X POST http://localhost:8080/auth/login \
+curl -X POST http://localhost:8080/api/login \
   -H "Content-Type: application/json" \
   -d '{"username":"user","password":"pass"}'
 ```
@@ -309,10 +322,10 @@ Write clear, specific task descriptions:
 
 ```bash
 # Good
-python src/agent.py --task "Navigate to reddit.com, search for 'python tutorials', and save the first 3 post titles"
+uv run src/agent.py --task "Navigate to reddit.com, search for 'python tutorials', and save the first 3 post titles"
 
 # Avoid vague descriptions
-python src/agent.py --task "do some web stuff"
+uv run src/agent.py --task "do some web stuff"
 ```
 
 ### Resource Management

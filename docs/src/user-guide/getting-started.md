@@ -21,11 +21,21 @@ nix develop
 # GPU-accelerated environment (recommended)
 nix develop .#gpu
 
-# Documentation environment
+# Shell with additional AI CLI tools
+nix develop .#ai
+
+# Docker-compose helper environment for the bundled Neko stack
+nix develop .#neko
+
+# Documentation tooling
 nix develop .#docs
 
-# Neko Docker environment
-nix develop .#neko
+# Optimised variants
+nix develop .#cpu-opt
+nix develop .#gpu-opt
+
+# Trusted Execution Environment tooling
+nix develop .#tee
 ```
 
 ### GPU Environment (Recommended)
@@ -80,15 +90,17 @@ export NEKO_PASS="your-password"
 
 ```bash
 # Run with a simple task
-python src/agent.py --task "Navigate to google.com and search for 'AI automation'"
+uv run src/agent.py --task "Navigate to google.com and search for 'AI automation'"
 
-# Run with custom configuration
-python src/agent.py \
+# Run with REST authentication (the agent performs the login handshake)
+uv run src/agent.py \
   --task "Your automation task" \
-  --max-steps 20 \
   --neko-url "http://localhost:8080" \
-  --neko-user "user" \
-  --neko-pass "password"
+  --username "user" \
+  --password "password"
+
+# Keep the agent online and accept new tasks from chat
+uv run src/agent.py --online --neko-url "http://localhost:8080" --username user --password password
 ```
 
 ### With Training Data Capture
@@ -97,10 +109,10 @@ To enable training data collection during automation:
 
 ```bash
 # Terminal 1: Start capture service
-python src/capture.py
+uv run src/capture.py
 
-# Terminal 2: Run agent (capture will automatically record)
-python src/agent.py --task "Your task description"
+# Terminal 2: Run agent (capture watches chat messages for /start and /stop)
+uv run src/agent.py --task "Your task description"
 ```
 
 See [Training Data Capture](./capture.md) for detailed capture configuration.
@@ -110,18 +122,18 @@ See [Training Data Capture](./capture.md) for detailed capture configuration.
 For voice feedback during automation:
 
 ```bash
-# Terminal 1: Start TTS service
-python src/yap.py
+# Terminal 1: Start TTS service (F5-TTS + WebRTC audio)
+uv run src/yap.py
 
-# Terminal 2: Run agent (with voice announcements)
-python src/agent.py --task "Your task" --enable-voice
+# Terminal 2: Run the agent – leave audio enabled (default) so the browser hears YAP
+uv run src/agent.py --task "Describe what you see"
 ```
 
 ## Configuration
 
 ### Environment Variables
 
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (copy `.env.example` first):
 
 ```bash
 # Neko server connection
@@ -129,10 +141,21 @@ NEKO_URL=http://localhost:8080
 NEKO_USER=user
 NEKO_PASS=password
 
-# Agent settings
-AGENT_LOGLEVEL=INFO
-AGENT_MAX_STEPS=15
-AGENT_TIMEOUT=300
+# Agent behaviour
+NEKO_TASK="Default task description"
+NEKO_MODE=web
+NEKO_MAX_STEPS=8
+NEKO_AUDIO=1
+REFINEMENT_STEPS=5
+NEKO_ICE_POLICY=strict
+NEKO_RTCP_KEEPALIVE=0
+NEKO_SKIP_INITIAL_FRAMES=5
+NEKO_FORCE_EXIT_GUARD_MS=0
+NEKO_LOGLEVEL=INFO
+NEKO_LOG_FORMAT=text
+NEKO_METRICS_PORT=9000
+# FRAME_SAVE_PATH="./tmp/frame.png"
+# CLICK_SAVE_PATH="./tmp/actions"
 
 # Capture settings (optional)
 CAPTURE_OUT=./data/mds
@@ -143,6 +166,7 @@ CAPTURE_REMOTE=s3://your-bucket/training-data
 YAP_VOICES_DIR=./voices
 YAP_SR=48000
 YAP_PARALLEL=2
+YAP_MAX_CHARS=350
 ```
 
 ### GPU Configuration
@@ -169,13 +193,13 @@ Test your setup:
 python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 
 # Test agent connection
-python src/agent.py --help
+uv run src/agent.py --healthcheck
 
-# Test capture (if enabled)
-python src/capture.py --healthcheck
+# Explore capture options (the script exits when interrupted)
+uv run src/capture.py --help
 
-# Test TTS (if enabled)  
-python src/yap.py --healthcheck
+# Test TTS (if enabled)
+uv run src/yap.py --healthcheck
 ```
 
 ## Next Steps

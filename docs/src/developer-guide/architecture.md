@@ -253,13 +253,13 @@ neko-services up
 
 # Terminal 2: Agent
 nix develop .#gpu  
-python src/agent.py --task "automation task"
+uv run src/agent.py --task "automation task"
 
 # Terminal 3: Capture (optional)
-python src/capture.py
+uv run src/capture.py
 
 # Terminal 4: TTS (optional)
-python src/yap.py
+uv run src/yap.py
 ```
 
 ### Production Considerations
