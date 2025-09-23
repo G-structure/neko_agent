@@ -452,7 +452,6 @@ PY
 
           neko = pkgs.mkShell {
             buildInputs = [
-              pkgs.colima
               pkgs.docker
               pkgs.docker-buildx
               pkgs.docker-compose
@@ -462,32 +461,30 @@ PY
               pkgs.nodePackages.npm
               (pkgs.writeShellScriptBin "neko-services" ''
                 COMPOSE_FILE="${./docker-compose/neko-server.yaml}"
-                ensure_colima() {
-                  if ! ${pkgs.colima}/bin/colima status >/dev/null 2>&1; then
-                    echo "Starting Colima..."
-                    ${pkgs.colima}/bin/colima start --vm-type vz --cpu 2 --memory 4 --mount-type sshfs --mount "~:w"
-                    sleep 5
+                ensure_docker() {
+                  if ! docker info >/dev/null 2>&1; then
+                    echo "❌ Docker daemon is not running or not accessible"
+                    echo "Please start Docker daemon first"
+                    exit 1
                   fi
-                  export DOCKER_HOST="unix://$(readlink -f ~/.colima/default/docker.sock)"
                 }
                 case "$1" in
-                  up) echo "Starting Neko..."; ensure_colima; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" up -d ;;
+                  up) echo "Starting Neko..."; ensure_docker; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" up -d ;;
                   down) ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" down ;;
-                  restart) ensure_colima; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" restart ;;
-                  pull) ensure_colima; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" pull ;;
+                  restart) ensure_docker; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" restart ;;
+                  pull) ensure_docker; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" pull ;;
                   logs) ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" logs -f ''${2:-} ;;
                   ps) ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" ps ;;
-                  status) if ${pkgs.colima}/bin/colima status >/dev/null 2>&1; then ${pkgs.colima}/bin/colima status; else echo "Colima not running"; fi; ensure_colima; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" ps ;;
-                  update) ensure_colima; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" pull; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" up -d ;;
-                  run-docker) ensure_colima; bash "$COMPOSE_FILE" ;;
-                  *) echo "Usage: neko-services {up|down|restart|pull|logs|ps|status|update|run-docker}"; exit 1 ;;
+                  status) ensure_docker; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" ps ;;
+                  update) ensure_docker; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" pull; ${pkgs.docker-compose}/bin/docker-compose -f "$COMPOSE_FILE" up -d ;;
+                  *) echo "Usage: neko-services {up|down|restart|pull|logs|ps|status|update}"; exit 1 ;;
                 esac
               '')
             ];
             shellHook = ''
               echo "Neko Docker environment loaded!"
               echo "Neko at http://localhost:8080"
-              export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+              echo "Make sure Docker daemon is running"
               ${npmAITools}
             '';
           };

@@ -9,7 +9,7 @@ self: super: {
         owner = "lucidrains";
         repo = "evolutionary-policy-optimization";
         rev = "main";
-        sha256 = "1jffvcdrmfs8bzpwv8cfck39gkzqp24yp1nn1ckzzql1w2ngr48y";
+        sha256 = "sha256-wLsEdXBTyFTuOUo8G6y0iYcA+ozZc8MmrmzQ7zazpaY=";
       };
 
       # Uses Hatchling backend per pyproject.toml
