@@ -57,6 +57,7 @@ class HTTPNekoClient(NekoClient):
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._chat_listeners: list[Callable[[str, Dict[str, Any]], None]] = []
 
         # Frame polling
         self._last_frame: Optional[Frame] = None
@@ -370,6 +371,16 @@ class HTTPNekoClient(NekoClient):
         """
         logger.debug("Chat message: %s", content)
         # This can be used by capture.py for /start and /stop commands
+        for listener in list(self._chat_listeners):
+            try:
+                listener(content, msg)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error("Chat listener failed: %s", exc, exc_info=True)
+
+    def add_chat_listener(self, callback: Callable[[str, Dict[str, Any]], None]) -> None:
+        """Register a callback invoked for each chat message."""
+
+        self._chat_listeners.append(callback)
 
     def _handle_system_message(self, msg: Dict[str, Any]) -> None:
         """Handle system messages.
