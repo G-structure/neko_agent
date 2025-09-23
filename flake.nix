@@ -55,6 +55,7 @@
       nekoOverlays = [
         (import ./overlays/znver2-flags.nix)   # provides pkgs.nekoZnver2Env
         (import ./overlays/vmm-cli.nix)        # provides pkgs.vmm-cli
+        (import ./overlays/triton.nix)         # fix triton compilation issues
         # ml-pkgs.overlays.torch-family          # ml-pkgs torch overlay first
         (import ./overlays/pylibsrtp.nix)      # python packages after torch
         (import ./overlays/aioice.nix)
@@ -359,15 +360,16 @@
             ps.tqdm
           ];
 
-          # Portable Python env (CUDA wheels)
+          # From-source Python env with PyTorch
           pyEnvGeneric = pkgs.python3.withPackages (ps: [
-            ps."torch-bin"
-            ps."torchvision-bin"
-            ps."torchaudio-bin"
-            (ps.accelerate.override { torch = ps."torch-bin"; })
+            ps.torch
+            ps.torchvision
+            ps.torchaudio
+            ps.triton
+            ps.accelerate
           ] ++ commonPythonPackages ps);
 
-          # Swap to from-source PyTorch here if/when you want to build locally.
+          # Same environment for both generic and optimized
           pyEnvOpt = pyEnvGeneric;
 
           # Zen2 flags script (Bash env exports) from overlay
@@ -636,12 +638,13 @@ PY
           };
           cuda = pkgs.cudaPackages_12_8;
 
-          # Reuse the same python environment definitions from devShells
+          # Reuse the same python environment definitions from devShells (from-source)
           pyEnvGeneric = pkgs.python3.withPackages (ps: [
-            ps."torch-bin"
-            ps."torchvision-bin"
-            ps."torchaudio-bin"
-            (ps.accelerate.override { torch = ps."torch-bin"; })
+            ps.torch
+            ps.torchvision
+            ps.torchaudio
+            ps.triton
+            ps.accelerate
           ] ++ (let commonPythonPackages = ps: [
             ps.transformers
             ps.pillow
