@@ -1,0 +1,3 @@
+[submodule "extern/neko"]
+	path = extern/neko
+	url = https://github.com/m1k1o/neko.git
