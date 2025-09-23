@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "neko-agent"
+version = "0.1.0"
+description = "AI-powered automation system for Neko servers via WebRTC"
+authors = [{name = "Neko Agent Team"}]
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "aiortc>=1.5.0",
+    "websockets>=11.0.0",
+    "requests>=2.30.0",
+    "Pillow>=10.0.0",
+    "prometheus-client>=0.17.0",
+    "accelerate>=0.20.0",
+    "datasets>=2.14.0",
+    "streaming>=0.7.0",
+    "f5-tts>=0.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+neko-agent = "src.agent:main"
+neko-manual = "src.manual:main"
+neko-capture = "src.capture:main"
+neko-yap = "src.yap:main"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+select = ["E", "W", "F", "I", "N", "UP"]
+ignore = ["E501"]  # Line too long (handled by black)
+
+[tool.ruff.isort]
+force-single-line = true
