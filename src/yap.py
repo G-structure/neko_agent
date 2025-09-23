@@ -31,6 +31,70 @@ Dependencies
 - Structured logging (text/json).
 - Graceful shutdown on SIGINT/SIGTERM.
 
+Environment variables
+---------------------
+# Connection
+YAP_WS                        # Direct WebSocket URL (alternative to REST)
+NEKO_URL                      # Base HTTP(S) URL for REST login
+NEKO_USER                     # Username for authentication
+NEKO_PASS                     # Password for authentication
+
+# Audio configuration
+YAP_SR                        # Output sample rate (default: 48000)
+YAP_AUDIO_CHANNELS            # Number of channels: 1|2 (default: 1)
+YAP_FRAME_MS                  # Frame size in ms: 10|20|30|40|60 (default: 20)
+YAP_JITTER_MAX_SEC            # PCM jitter buffer cap in seconds (default: 6.0)
+
+# TTS pipeline
+YAP_PARALLEL                  # Parallel TTS workers (default: 2)
+YAP_CHUNK_TARGET_SEC          # Target chunk duration in seconds (default: 3.0)
+YAP_MAX_CHARS                 # Hard limit per text chunk (default: 350)
+YAP_OVERLAP_MS                # Crossfade overlap in ms (default: 30)
+
+# Voice configuration
+YAP_VOICES_DIR                # Voice registry directory (default: ./voices)
+YAP_SPK_DEFAULT               # Default speaker ID (default: default)
+
+# WebRTC/ICE configuration
+YAP_STUN_URL                  # STUN server (default: stun:stun.l.google.com:19302)
+YAP_TURN_URL                  # Optional TURN server URL
+YAP_TURN_USER                 # TURN username
+YAP_TURN_PASS                 # TURN password
+YAP_ICE_POLICY                # ICE policy: strict|all (default: strict)
+
+# Logging and metrics
+YAP_LOGLEVEL                  # DEBUG|INFO|WARNING|ERROR (default: INFO)
+YAP_LOG_FORMAT                # text|json (default: text)
+YAP_METRICS_PORT              # Prometheus metrics port (default: 0=disabled)
+PORT                          # Alternative metrics port (takes priority)
+
+Typical use
+-----------
+# Basic usage - connect to Neko server and broadcast TTS
+uv run src/yap.py
+
+# Direct WebSocket connection
+YAP_WS=wss://neko.example.com/api/ws?token=... uv run src/yap.py
+
+# Use REST login (if YAP_WS not set, falls back to NEKO_URL/USER/PASS)
+NEKO_URL=https://neko.example.com NEKO_USER=user NEKO_PASS=pass uv run src/yap.py
+
+# Chat commands once connected:
+# /yap Hello world                     - Speak text immediately
+# /yap:begin                           - Start streaming mode
+# This is streaming text...
+# /yap:end                             - End streaming and speak
+# /yap:stop                            - Cancel current speech
+# /yap:voice reload                    - Reload voices.json
+# /yap:voice set speaker_name          - Switch active voice
+# /yap:voice add name ref.wav "text"   - Add new voice
+
+# Configure TTS parameters
+YAP_PARALLEL=4 YAP_CHUNK_TARGET_SEC=5.0 uv run src/yap.py
+
+# Using just command (preferred)
+just yap
+
 """
 
 from __future__ import annotations

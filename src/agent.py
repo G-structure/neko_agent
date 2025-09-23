@@ -1,26 +1,112 @@
 #!/usr/bin/env python3
+# src/agent.py
 """
-agent.py - Production-ready ShowUI-2B Neko v3 WebRTC GUI agent with deterministic shutdown.
+agent.py — ShowUI-2B Neko WebRTC GUI automation agent with AI vision models.
 
-12-Factor App compliant refactor:
+What it does
+------------
+- Connects to Neko servers via WebRTC for real-time GUI automation
+- Processes video frames with ShowUI-2B/Qwen2VL models for visual reasoning
+- Executes actions (click, type, scroll, etc.) based on AI model predictions
+- Supports both offline (single-task) and online (multi-task via chat) modes
+- Handles WebRTC signaling, ICE negotiation, and media streaming
+- Provides iterative refinement for precise click coordinates
+- Emits action annotations to chat for training data capture
+
+Key features
+------------
+- TaskGroup lifecycle: all child tasks cancelled/awaited for prompt exit
+- WebSocket client: tidy read/send loops with automatic reconnection
+- aiortc teardown: proper cleanup of receivers/transceivers & tracks
+- Early ICE handling: buffers remote ICE candidates before SRD
+- Lite mode (WS-video): supports base64-encoded frames over WebSocket
+- Executor shutdown: wait + cancel_futures to prevent lingering threads
+- Optional RTCP keepalive (NEKO_RTCP_KEEPALIVE=1) for NAT/TURN stability
+- Prometheus metrics server for monitoring (started once, shut down cleanly)
+- Optional hard-exit guard (NEKO_FORCE_EXIT_GUARD_MS>0) for cleanup safety
+
+Dependencies
+------------
+- torch, transformers: ShowUI-2B/Qwen2VL model inference
+- aiortc: WebRTC peer connection and media handling
+- websockets: WebSocket client for Neko signaling
+- PIL: Image processing and manipulation
+- prometheus_client: Metrics collection and export
+- requests: HTTP client for REST authentication
+
+12-Factor compliance
+--------------------
 - Centralized configuration via Settings dataclass
 - All side effects moved to main() (no side effects in imports/init)
 - JSON logging support via NEKO_LOG_FORMAT environment variable
 - $PORT takes priority over NEKO_METRICS_PORT for metrics server
-- Frame/click saving uses /tmp/neko-agent/ for relative paths with explicit logging
-- Added --healthcheck CLI flag for configuration validation
-- Preserved all existing CLI flags and behavior including on-demand host control
+- Frame/click saving uses /tmp/neko-agent/ for relative paths
 
-Highlights (Python 3.11+ / 3.13-ready):
-- TaskGroup lifecycle: all child tasks cancelled/awaited for prompt exit.
-- WebSocket client: tidy read/send loops; await close() and wait_closed() when available.
-- aiortc teardown: stop receivers/transceivers & tracks before RTCPeerConnection.close().
-- Early ICE handling: buffer remote ICE candidates before SRD, then apply after SRD.
-- Lite mode (WS-video): nav loop stops promptly when WS disconnects.
-- Executor shutdown: wait + cancel_futures to prevent lingering threads.
-- Optional RTCP keepalive (NEKO_RTCP_KEEPALIVE=1) to stabilize some NAT/TURN links.
-- Prometheus metrics server started once and shut down cleanly.
-- Optional hard-exit guard (NEKO_FORCE_EXIT_GUARD_MS>0) to terminate if non-daemon threads linger.
+Typical use
+-----------
+# Basic usage - connect to Neko server and run automation task
+uv run src/agent.py --task "Search for weather forecast" --ws wss://neko.example.com/api/ws?token=...
+
+# Use REST login with credentials
+uv run src/agent.py --neko-url https://neko.example.com --username user --password pass \
+    --task "Click on the search button"
+
+# Online mode - wait for tasks from chat
+uv run src/agent.py --online --ws wss://neko.example.com/api/ws?token=...
+
+# Save frames and actions for debugging
+FRAME_SAVE_PATH=/tmp/last_frame.png CLICK_SAVE_PATH=/tmp/actions/ uv run src/agent.py \
+    --task "Fill out the form"
+
+# Using just commands (preferred)
+just agent                        # Run with default task from .env
+just agent-task "Your task here"  # Run with custom task
+just uv-agent                     # Run with UV explicitly
+
+Environment variables
+---------------------
+# Connection
+NEKO_URL            # Base HTTP(S) URL for REST login
+NEKO_USER           # Username for authentication
+NEKO_PASS           # Password for authentication
+NEKO_WS             # Direct WebSocket URL (alternative to REST)
+
+# Model configuration
+REPO_ID             # Model repository (default: showlab/ShowUI-2B)
+SIZE_SHORTEST_EDGE  # Image preprocessing (default: 224)
+SIZE_LONGEST_EDGE   # Image preprocessing (default: 1344)
+OFFLOAD_FOLDER      # Model offload directory for MPS
+
+# Agent behavior
+NEKO_TASK           # Default navigation task
+NEKO_MODE           # Navigation mode: web|phone (default: web)
+NEKO_MAX_STEPS      # Max steps per task (default: 8)
+NEKO_AUDIO          # Enable audio: 0|1 (default: 1)
+REFINEMENT_STEPS    # Click refinement iterations (default: 5)
+NEKO_RUN_ID         # Optional run identifier
+
+# Logging and metrics
+NEKO_LOGLEVEL       # DEBUG|INFO|WARNING|ERROR (default: INFO)
+NEKO_LOGFILE        # Optional log file path
+NEKO_LOG_FORMAT     # text|json (default: text)
+NEKO_METRICS_PORT   # Prometheus metrics port (default: 9000)
+PORT                # Alternative metrics port (takes priority)
+
+# Frame/action capture
+FRAME_SAVE_PATH     # Path to save last frame
+CLICK_SAVE_PATH     # Directory for action-marked frames
+
+# WebRTC/ICE configuration
+NEKO_ICE_POLICY     # strict|all (default: strict)
+NEKO_STUN_URL       # STUN server (default: stun:stun.l.google.com:19302)
+NEKO_TURN_URL       # Optional TURN server URL
+NEKO_TURN_USER      # TURN username
+NEKO_TURN_PASS      # TURN password
+NEKO_RTCP_KEEPALIVE # Enable RTCP keepalive: 0|1 (default: 0)
+
+# Advanced options
+NEKO_SKIP_INITIAL_FRAMES  # Skip N initial frames (default: 5)
+NEKO_FORCE_EXIT_GUARD_MS  # Force exit timeout in ms (default: 0=disabled)
 
 """
 

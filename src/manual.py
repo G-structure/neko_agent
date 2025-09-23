@@ -1,31 +1,85 @@
 #!/usr/bin/env python3
+# src/manual.py
 """
-neko_manual_cli.py — Production-Ready Manual Control REPL for a Neko v3 Server.
+manual.py — Manual control REPL for Neko servers with WebRTC support.
 
-This script provides a command-line interface for manually interacting with a
-Neko v3 instance. It correctly implements the WebRTC signaling handshake
-(via aiortc) required by many modern Neko servers before control events are
-accepted, but it does not process or render the media stream.
+What it does
+------------
+- Provides interactive command-line interface for controlling Neko servers
+- Implements complete WebRTC signaling handshake via aiortc
+- Handles mouse movements, clicks, keyboard input, and scrolling
+- Manages host control acquisition and release
+- Supports both REST login and direct WebSocket authentication
+- Dynamically learns keyboard layouts from the server
+- Maintains persistent connection with automatic reconnection
 
-Hardenings:
-- Silences verbose DEBUG logs from underlying libraries (websockets, aiortc).
-- Handles all 12 critical protocol fixes for full Neko v3 compatibility.
-- Dynamically learns keyboard layouts from the server via 'keyboard/map'.
-- Responds to server heartbeats correctly to prevent disconnection.
-- Intelligently re-requests host control if it is lost or given to another user.
-- Manages asynchronous tasks safely to prevent resource leaks.
-- Real reconnection: if the WebSocket drops, rebuild the connection and tasks.
-- Strict ICE mapping (only urls/username/credential are used).
-- Sequential double-click to preserve ordering/timing.
-- Routes and prints `error/...` events.
-- Accepts `keyboard/map` payload in both shapes (flat dict or {"map": {...}}).
+Key features
+------------
+- Complete WebRTC signaling (SDP offer/answer + ICE candidate exchange)
+- REPL with comprehensive command set (move, click, scroll, text, keys)
+- Live color-coded event logging for server messages
+- Normalized (0..1) or pixel coordinate support
+- Sequential double-click with proper timing preservation
+- Intelligent host control re-acquisition when lost
+- Graceful task management to prevent resource leaks
+- Robust reconnection when WebSocket connection drops
+- Strict ICE mapping for server-provided STUN/TURN
+- Server heartbeat handling to maintain connection
 
-Features:
-- Robust REST login to automatically acquire a WebSocket token.
-- Complete WebRTC signaling (SDP offer/answer + ICE candidate exchange).
-- REPL for a wide range of commands: move, click, scroll, text input, key presses.
-- Live, color-coded logger for important server events.
-- Optional normalized (0..1) or pixel coordinates.
+Dependencies
+------------
+- requests: REST API authentication
+- websockets: WebSocket client for signaling
+- aiortc: WebRTC peer connection (signaling only, no media)
+
+12-Factor compliance
+--------------------
+- Environment-based configuration via NEKO_* variables
+- Structured logging with configurable levels
+- No hardcoded credentials or endpoints
+- Clean separation of connection and control logic
+
+Typical use
+-----------
+# Basic usage - connect with REST login
+uv run src/manual.py --neko-url https://neko.example.com --username user --password pass
+
+# Direct WebSocket connection with token
+uv run src/manual.py --ws wss://neko.example.com/api/ws?token=...
+
+# Use normalized coordinates (0..1 instead of pixels)
+uv run src/manual.py --ws wss://neko.example.com/api/ws?token=... --norm
+
+# Set custom screen size for coordinate scaling
+uv run src/manual.py --ws wss://neko.example.com/api/ws?token=... --size 1920x1080
+
+# Using just command (preferred)
+just manual
+
+# REPL commands once connected:
+# host                 - Request control
+# move 100 200         - Move mouse to coordinates
+# click                - Click at current position
+# tap 300 400          - Move and click
+# input 100 100 "text" - Click and type text
+# scroll down 3        - Scroll down 3 times
+# help                 - Show all commands
+
+Environment variables
+---------------------
+# Connection
+NEKO_URL            # Base HTTP(S) URL for REST login
+NEKO_USER           # Username for authentication  
+NEKO_PASS           # Password for authentication
+NEKO_WS             # Direct WebSocket URL (alternative to REST)
+
+# Logging
+NEKO_LOGLEVEL       # DEBUG|INFO|WARNING|ERROR (default: INFO)
+NEKO_LOGFILE        # Optional log file path
+
+# Audio
+NEKO_AUDIO          # Enable audio: 0|1 (default: 1)
+
 """
 
 import os

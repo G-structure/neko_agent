@@ -8,7 +8,8 @@ This script consumes training data produced by ``src/capture.py`` (MosaicML
 Streaming, aka MDS), turns each annotated action into a supervised example,
 and fine‑tunes the ShowUI/Qwen2VL model used by ``src/agent.py``.
 
-12‑Factor compliance:
+12‑Factor compliance
+--------------------
 - All configuration comes from environment variables (overridable by CLI).
 - No side effects at import; main logic lives under ``main()``.
 - Structured logging to stdout; optional JSON format via ``TRAIN_LOG_FORMAT``.
@@ -31,34 +32,57 @@ For supervised learning, we create one training example per action:
 We tokenize the concatenation of prompt + target and mask the prompt tokens to
 compute loss only on the target portion (standard causal LM supervision).
 
-Environment variables (CLI flags override)
------------------------------------------
-- TRAIN_LOCAL:     Local MDS directory (e.g., ./data/mds)
-- TRAIN_REMOTE:    Optional remote MDS (e.g., s3://bucket/prefix)
-- TRAIN_CACHE:     Local cache directory for StreamingDataset (default: ./data/cache)
-- TRAIN_OUTPUT:    Output directory for checkpoints (default: ./checkpoints)
-- TRAIN_LOGLEVEL:  DEBUG|INFO|WARNING|ERROR (default: INFO)
-- TRAIN_LOG_FORMAT:text|json (default: text)
-- TRAIN_EPOCHS:    Number of epochs (default: 1)
-- TRAIN_BATCH:     Global batch size (default: 1)
-- TRAIN_ACCUM:     Gradient accumulation steps (default: 1)
-- TRAIN_LR:        Learning rate (default: 5e-6)
-- TRAIN_WD:        Weight decay (default: 0.0)
-- TRAIN_MAX_STEPS: Optional hard step cap (default: 0 = disabled)
-- TRAIN_MAX_SAMPLES_PER_EPOCH: Optional cap for debug (default: 0 = disabled)
-- TRAIN_HISTORY_STEPS: Include up to N previous actions in history text (default: 0)
-- SEED:            RNG seed (default: 1337)
+Environment variables
+---------------------
+# Data paths
+TRAIN_LOCAL                   # Local MDS directory (default: ./data/mds)
+TRAIN_REMOTE                  # Optional remote MDS (e.g., s3://bucket/prefix)
+TRAIN_CACHE                   # Local cache directory for StreamingDataset (default: ./data/cache)
+TRAIN_OUTPUT                  # Output directory for checkpoints (default: ./checkpoints)
 
-Usage
------
-Run inside the Nix dev shell (loads .env automatically):
+# Model configuration
+REPO_ID                       # Model repository (default: showlab/ShowUI-2B)
+SIZE_SHORTEST_EDGE            # Image preprocessing (default: 224)
+SIZE_LONGEST_EDGE             # Image preprocessing (default: 1344)
 
-    python src/train.py
+# Training parameters
+TRAIN_EPOCHS                  # Number of epochs (default: 1)
+TRAIN_BATCH                   # Global batch size (default: 1)
+TRAIN_ACCUM                   # Gradient accumulation steps (default: 1)
+TRAIN_LR                      # Learning rate (default: 5e-6)
+TRAIN_WD                      # Weight decay (default: 0.0)
+TRAIN_MAX_STEPS               # Optional hard step cap (default: 0 = disabled)
+TRAIN_MAX_SAMPLES_PER_EPOCH   # Optional cap for debug (default: 0 = disabled)
+TRAIN_HISTORY_STEPS           # Include up to N previous actions in history text (default: 0)
 
-or with overrides:
+# General
+SEED                          # RNG seed (default: 1337)
+TRAIN_LOGLEVEL                # DEBUG|INFO|WARNING|ERROR (default: INFO)
+TRAIN_LOG_FORMAT              # text|json (default: text)
 
-    TRAIN_BATCH=2 TRAIN_EPOCHS=1 python src/train.py --local ./data/mds \
-        --output ./checkpoints/showui-ft
+Typical use
+-----------
+# Basic training on local MDS data
+uv run src/train.py --local ./data/mds --output ./checkpoints
+
+# Train with remote S3 data source
+uv run src/train.py --remote s3://bucket/training-data --cache ./data/cache \
+    --output ./checkpoints/model-v2
+
+# Fine-tune with specific hyperparameters
+TRAIN_EPOCHS=3 TRAIN_BATCH=4 TRAIN_LR=1e-5 uv run src/train.py \
+    --local ./data/mds --output ./checkpoints/fine-tuned
+
+# Include action history in training examples
+uv run src/train.py --local ./data/mds --history 3 --output ./checkpoints
+
+# Using just command (preferred)
+just train        # Train with default settings from .env
+just uv-train     # Train with UV explicitly
+
+# Quick debug run with limited samples
+TRAIN_MAX_SAMPLES_PER_EPOCH=100 uv run src/train.py --local ./data/mds \
+    --epochs 1 --output ./checkpoints/test
 
 """
 
@@ -647,4 +671,3 @@ if __name__ == "__main__":
     import asyncio
 
     asyncio.run(main())
-
