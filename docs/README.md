@@ -18,7 +18,7 @@ mdbook serve --open
 Or use the convenience command from the project root:
 
 ```bash
-just docs-serve  # (if available)
+nix run .#docs-serve
 ```
 
 ## GitHub Pages Deployment

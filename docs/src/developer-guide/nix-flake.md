@@ -753,7 +753,7 @@ print('Model loaded successfully')
 "
 
 # 4. Run agent
-python src/agent.py --task "Navigate to google.com"
+uv run src/agent.py --task "Navigate to google.com"
 ```
 
 ### Documentation Development

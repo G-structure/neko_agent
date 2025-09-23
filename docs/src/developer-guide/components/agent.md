@@ -629,7 +629,7 @@ agent = NekoAgent(
 
 ```bash
 # Validate configuration
-python src/agent.py --healthcheck
+uv run src/agent.py --healthcheck
 
 # Expected output:
 # Configuration validation: PASSED
@@ -646,7 +646,7 @@ export NEKO_LOGLEVEL="DEBUG"
 export FRAME_SAVE_PATH="./debug/frames"
 export CLICK_SAVE_PATH="./debug/actions"
 
-python src/agent.py --task "test navigation" --max-steps 3
+uv run src/agent.py --task "test navigation" --max-steps 3
 ```
 
 ### Frame Analysis
@@ -675,10 +675,10 @@ export CAPTURE_OUT="./training-data"
 export CAPTURE_REMOTE="s3://training-bucket/episodes"
 
 # Start capture in background
-python src/capture.py &
+uv run src/capture.py &
 
 # Run agent (capture will automatically record)
-python src/agent.py --task "automation task"
+uv run src/agent.py --task "automation task"
 ```
 
 ### With TTS Service
@@ -688,10 +688,10 @@ python src/agent.py --task "automation task"
 export YAP_VOICES_DIR="./voices"
 
 # Start TTS service
-python src/yap.py &
+uv run src/yap.py &
 
-# Run agent with voice enabled
-python src/agent.py --task "automation task" --audio
+# Run agent with voice enabled (audio is negotiated automatically)
+uv run src/agent.py --task "automation task"
 ```
 
 ## Future Enhancements
