@@ -103,6 +103,8 @@ import contextlib
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from utils import setup_logging
+
 
 # --- Logging utilities (no heavy imports here) ---------------------------------
 
@@ -125,30 +127,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False)
 
 
-def setup_logging(level: str = "INFO", fmt: str = "text") -> logging.Logger:
-    """Configure root logger with text or JSON formatting.
-
-    :param level: Log level name
-    :param fmt: 'text' or 'json'
-    :returns: Module logger
-    """
-    root = logging.getLogger()
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    if fmt.lower() == "json":
-        formatter = JsonFormatter()
-    else:
-        formatter = logging.Formatter(
-            "[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s",
-            datefmt="%H:%M:%S",
-        )
-    h = logging.StreamHandler()
-    h.setFormatter(formatter)
-    root.addHandler(h)
-    root.setLevel(level.upper())
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    return logging.getLogger("train")
+# setup_logging is imported from utils
 
 
 # --- Config --------------------------------------------------------------------
@@ -529,7 +508,8 @@ async def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 setattr(cfg, k if k not in ("local", "remote", "cache", "output") else k, v)
 
-    log = setup_logging(cfg.loglevel, cfg.log_format)
+    setup_logging(cfg.loglevel, cfg.log_format, None)
+    log = logging.getLogger("train")
     errs = cfg.validate()
     if errs:
         for e in errs:

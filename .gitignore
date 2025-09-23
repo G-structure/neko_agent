@@ -21,3 +21,4 @@ certs
 compose-metadata.json
 *-metadata.json
 *-compose.json
+__pycache__

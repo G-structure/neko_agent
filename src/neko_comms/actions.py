@@ -5,14 +5,61 @@ interacting with Neko sessions, including mouse movements,
 keyboard input, and high-level action interpretation.
 """
 
+import ast
 import asyncio
 import json
 import logging
 from typing import Callable, Tuple, List, Optional, Dict, Any
 
-from .types import Action, BUTTON_CODES, name_keysym, clamp_xy
+from .types import Action, BUTTON_CODES, name_keysym, clamp_xy, ACTION_SPACES
 
 logger = logging.getLogger(__name__)
+
+
+def safe_parse_action(output_text: str, nav_mode: str = "web", logger: Optional[logging.Logger] = None, parse_errors_counter=None) -> Optional[Dict[str, Any]]:
+    """Parse and validate LLM output text into a structured action dictionary.
+
+    :param output_text: The raw output text from the LLM to parse
+    :param nav_mode: The navigation mode ('web' or 'phone') which determines allowed actions
+    :param logger: Optional logger instance for recording parse errors
+    :param parse_errors_counter: Optional metrics counter for parse errors
+    :return: A validated action dictionary or None if parsing/validation fails
+    """
+    try:
+        act = json.loads(output_text)
+    except json.JSONDecodeError:
+        try:
+            act = ast.literal_eval(output_text)
+        except (ValueError, SyntaxError) as e:
+            if logger:
+                logger.error("Parse error: %s | Raw=%r", e, output_text)
+            if parse_errors_counter:
+                parse_errors_counter.inc()
+            return None
+
+    if isinstance(act, (tuple, list)) and len(act) > 0:
+        if logger:
+            logger.info("Model returned multiple actions, using first one: %r", act)
+        act = act[0]
+
+    try:
+        assert isinstance(act, dict)
+        typ = act.get("action")
+        if typ not in ACTION_SPACES.get(nav_mode, []):
+            if logger:
+                logger.warning("Non-whitelisted action: %r", typ)
+            if parse_errors_counter:
+                parse_errors_counter.inc()
+            return None
+        for k in ("action", "value", "position"):
+            assert k in act, f"Missing key {k}"
+        return act
+    except AssertionError as e:
+        if logger:
+            logger.error("Schema validation error: %s | Parsed=%r", e, act)
+        if parse_errors_counter:
+            parse_errors_counter.inc()
+        return None
 
 
 class ActionExecutor:
