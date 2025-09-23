@@ -20,6 +20,7 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/G-structure/neko_agent"
 edit-url-template = "https://github.com/G-structure/neko_agent/edit/main/docs/src/{path}"
 site-url = "/neko_agent/"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.search]
 enable = true
