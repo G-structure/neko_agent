@@ -30,11 +30,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import requests
 from PIL import Image, ImageDraw, ImageFont
-from prometheus_client import start_http_server, Counter, Histogram
+from metrics import (
+    frames_received, actions_executed, parse_errors, navigation_steps,
+    inference_latency, reconnects, resize_duration, start_metrics_server
+)
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
-from neko_comms import WebRTCNekoClient
+from neko_comms import WebRTCNekoClient, safe_parse_action
 from neko_comms.types import ACTION_SPACES
+from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
 
 
 # ----------------------
@@ -137,88 +141,39 @@ class Settings:
 
 
 # ----------------------
-# Logging Setup
+# Logging Setup (using utils.setup_logging)
 # ----------------------
-def setup_logging(settings: Settings) -> logging.Logger:
-    """Configure logging based on settings.
+def setup_agent_logging(settings: Settings) -> logging.Logger:
+    """Configure logging and setup directories for the agent.
 
     :param settings: Configuration settings containing log format, level, and file path
     :return: Configured logger instance
     """
-    # Clear any existing handlers
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
+    # Use common logging setup
+    logger = setup_logging(settings.log_level, settings.log_format, settings.log_file)
 
-    # Configure format based on settings
-    if settings.log_format == "json":
-        class JsonFormatter(logging.Formatter):
-            def format(self, record: logging.LogRecord) -> str:
-                log_entry = {
-                    'timestamp': self.formatTime(record),
-                    'level': record.levelname,
-                    'logger': record.name,
-                    'message': record.getMessage(),
-                }
-                if record.exc_info:
-                    log_entry['exception'] = self.formatException(record.exc_info)
-                return json.dumps(log_entry)
-        formatter = JsonFormatter()
-    else:
-        formatter = logging.Formatter(
-            '[%(asctime)s] %(name)-12s %(levelname)-7s - %(message)s',
-            datefmt='%H:%M:%S'
-        )
-
-    # Setup console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
-    root_logger.setLevel(settings.log_level.upper())
-
-    # Setup file handler if specified
-    if settings.log_file:
-        try:
-            file_handler = logging.FileHandler(settings.log_file)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
-        except Exception as e:
-            print(f"Failed to set up file logging to {settings.log_file}: {e}", file=sys.stderr)
-
-    # Configure third-party logger levels
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("aiortc").setLevel(logging.WARNING)
-    logging.getLogger("aioice").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.ERROR)
-
-    logger = logging.getLogger("neko_agent")
+    # Agent-specific directory setup
+    agent_logger = logging.getLogger("neko_agent")
 
     # Log frame/click saving configuration if enabled
     if settings.frame_save_path:
-        logger.info("Frame saving enabled: %s", settings.frame_save_path)
+        agent_logger.info("Frame saving enabled: %s", settings.frame_save_path)
         os.makedirs(os.path.dirname(settings.frame_save_path) or '/tmp/neko-agent', exist_ok=True)
 
     if settings.click_save_path:
-        logger.info("Click action saving enabled: %s", settings.click_save_path)
+        agent_logger.info("Click action saving enabled: %s", settings.click_save_path)
         dir_path = settings.click_save_path if os.path.isdir(settings.click_save_path) else os.path.dirname(settings.click_save_path)
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
         else:
             os.makedirs('/tmp/neko-agent', exist_ok=True)
 
-    return logger
+    return agent_logger
 
 
 # ----------------------
-# Metrics
+# Metrics (imported from metrics module)
 # ----------------------
-frames_received = Counter("neko_frames_received_total", "Total video frames received")
-actions_executed = Counter("neko_actions_executed_total", "Actions executed by type", ["action_type"])
-parse_errors = Counter("neko_parse_errors_total", "Action parse errors")
-navigation_steps = Counter("neko_navigation_steps_total", "Navigation step count")
-inference_latency = Histogram("neko_inference_latency_seconds", "Inference latency")
-reconnects = Counter("neko_reconnects_total", "WS reconnect attempts")
-resize_duration = Histogram("neko_resize_duration_seconds", "Resize time")
 
 
 # ----------------------
@@ -238,143 +193,8 @@ _NAV_SYSTEM = (
 
 
 # ----------------------
-# Utility functions
+# Utility functions (imported from utils and neko_comms modules)
 # ----------------------
-def resize_and_validate_image(image: Image.Image, settings: Settings, logger: logging.Logger) -> Image.Image:
-    """Resize image if it exceeds maximum dimensions while preserving aspect ratio.
-
-    :param image: The PIL Image to resize and validate
-    :param settings: Configuration settings containing size limits
-    :param logger: Logger instance for recording resize operations
-    :return: The original image if within size limits, or a resized copy
-    """
-    ow, oh = image.size
-    me = max(ow, oh)
-    if me > settings.size_longest_edge:
-        scale = settings.size_longest_edge / me
-        nw, nh = int(ow * scale), int(oh * scale)
-        t0 = time.monotonic()
-        image = image.resize((nw, nh), Image.LANCZOS)
-        resize_duration.observe(time.monotonic() - t0)
-        logger.info("Resized %dx%d -> %dx%d", ow, oh, nw, nh)
-    return image
-
-
-def save_atomic(img: Image.Image, path: str, logger: logging.Logger) -> None:
-    """Atomically save an image to disk using a temporary file and rename.
-
-    :param img: The PIL Image to save
-    :param path: The destination file path where the image should be saved
-    :param logger: Logger instance for recording save operations
-    """
-    target_dir = os.path.dirname(path) or os.getcwd()
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        suffix=".tmp",
-        prefix=os.path.basename(path) + ".",
-        dir=target_dir,
-        delete=False,
-    ) as tf:
-        tmp_path = tf.name
-        img.save(tf, format="PNG")
-        tf.flush()
-        os.fsync(tf.fileno())
-    try:
-        os.replace(tmp_path, path)
-        dir_fd = os.open(target_dir, os.O_DIRECTORY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-        logger.debug("Saved frame atomically to %s", path)
-    except Exception as e:
-        logger.error("Failed to save frame atomically to %s: %s", path, e, exc_info=True)
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
-
-
-def draw_action_markers(img: Image.Image, action: Dict[str, Any], step: int) -> Image.Image:
-    """Draw visual markers on an image to indicate performed actions.
-
-    :param img: The source image to annotate with action markers
-    :param action: Dictionary containing action details
-    :param step: The step number for labeling the action
-    :return: A copy of the input image with action markers and labels drawn
-    """
-    out = img.copy()
-    d = ImageDraw.Draw(out)
-    action_type = action.get("action", "UNKNOWN")
-    pos = action.get("position")
-    value = action.get("value", "")
-
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 16)
-    except Exception:
-        try:
-            font = ImageFont.load_default()
-        except Exception:
-            font = None
-
-    if isinstance(pos, list) and len(pos) == 2 and all(isinstance(v, (int, float)) for v in pos):
-        x = max(0, min(int(pos[0] * img.width), img.width - 1))
-        y = max(0, min(int(pos[1] * img.height), img.height - 1))
-        r = 15
-        d.ellipse([x - r, y - r, x + r, y + r], outline=(255, 0, 0), width=3)
-        d.line([x - r - 5, y, x + r + 5, y], fill=(255, 0, 0), width=2)
-        d.line([x, y - r - 5, x, y + r + 5], fill=(255, 0, 0), width=2)
-
-    label = f"Step {step}: {action_type}" + (f" '{value}'" if value else "")
-    if font:
-        bbox = d.textbbox((0, 0), label, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    else:
-        tw, th = len(label) * 8, 16
-    d.rectangle([10, 10, 10 + tw + 10, 10 + th + 10], fill=(0, 0, 0, 128))
-    d.text((15, 15), label, fill=(255, 255, 255), font=font)
-    return out
-
-
-def safe_parse_action(output_text: str, nav_mode: str = "web", logger: Optional[logging.Logger] = None) -> Optional[Dict[str, Any]]:
-    """Parse and validate LLM output text into a structured action dictionary.
-
-    :param output_text: The raw output text from the LLM to parse
-    :param nav_mode: The navigation mode ('web' or 'phone') which determines allowed actions
-    :param logger: Optional logger instance for recording parse errors
-    :return: A validated action dictionary or None if parsing/validation fails
-    """
-    try:
-        act = json.loads(output_text)
-    except json.JSONDecodeError:
-        try:
-            act = ast.literal_eval(output_text)
-        except (ValueError, SyntaxError) as e:
-            if logger:
-                logger.error("Parse error: %s | Raw=%r", e, output_text)
-            parse_errors.inc()
-            return None
-
-    if isinstance(act, (tuple, list)) and len(act) > 0:
-        if logger:
-            logger.info("Model returned multiple actions, using first one: %r", act)
-        act = act[0]
-
-    try:
-        assert isinstance(act, dict)
-        typ = act.get("action")
-        if typ not in ACTION_SPACES.get(nav_mode, []):
-            if logger:
-                logger.warning("Non-whitelisted action: %r", typ)
-            parse_errors.inc()
-            return None
-        for k in ("action", "value", "position"):
-            assert k in act, f"Missing key {k}"
-        return act
-    except AssertionError as e:
-        if logger:
-            logger.error("Schema validation error: %s | Parsed=%r", e, act)
-        parse_errors.inc()
-        return None
 
 
 # ----------------------
@@ -600,7 +420,7 @@ class NekoAgent:
                 frames_received.inc()
 
                 # Resize frame if needed
-                frame = resize_and_validate_image(frame, self.settings, self.logger)
+                frame = resize_and_validate_image(frame, self.settings.size_longest_edge, self.logger)
 
                 # Save frame if configured
                 if self.settings.frame_save_path:
@@ -692,7 +512,7 @@ class NekoAgent:
             self.logger.debug("Model output: %s", output_text)
 
             # Parse action
-            action = safe_parse_action(output_text, self.nav_mode, self.logger)
+            action = safe_parse_action(output_text, self.nav_mode, self.logger, parse_errors)
             return action
 
         except Exception as e:
@@ -778,24 +598,7 @@ class NekoAgent:
 # ----------------------
 # Entry Point
 # ----------------------
-def start_metrics_server(port: int, logger: logging.Logger) -> Tuple[Any, Any]:
-    """Start Prometheus metrics server.
-
-    :param port: Port number to bind the metrics server to
-    :param logger: Logger instance for recording server startup status
-    :return: Tuple of (server, thread) for clean shutdown
-    """
-    try:
-        ret = start_http_server(port)
-        if isinstance(ret, tuple) and len(ret) == 2:
-            server, thread = ret
-        else:
-            server, thread = ret, None
-        logger.info("Metrics server started on port %d", port)
-        return server, thread
-    except Exception as e:
-        logger.error("Failed to start metrics server on port %d: %s", port, e)
-        return None, None
+# start_metrics_server is imported from metrics module
 
 
 async def main() -> None:
@@ -835,7 +638,7 @@ async def main() -> None:
             sys.exit(0)
 
     # Setup logging
-    logger = setup_logging(settings)
+    logger = setup_agent_logging(settings)
 
     # Override log level if specified via CLI
     if args.loglevel:

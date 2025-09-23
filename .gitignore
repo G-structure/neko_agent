@@ -16,3 +16,4 @@ voices
 deps
 .venv
 .claude
+__pycache__

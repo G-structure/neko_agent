@@ -17,7 +17,9 @@ from .http_client import HTTPNekoClient
 from .broker import Broker
 from .signaler import Signaler
 from .types import Action, Frame, IceCandidate
-from .actions import ActionExecutor
+from .actions import ActionExecutor, safe_parse_action
+from .auth import rest_login_and_ws_url
+from .audio import PCMQueue, YAPAudioTrack
 from .frame_source import FrameSource, WebRTCFrameSource, LiteFrameSource, NoFrameSource
 
 __all__ = [
@@ -30,6 +32,10 @@ __all__ = [
     "Frame",
     "IceCandidate",
     "ActionExecutor",
+    "safe_parse_action",
+    "rest_login_and_ws_url",
+    "PCMQueue",
+    "YAPAudioTrack",
     "FrameSource",
     "WebRTCFrameSource",
     "LiteFrameSource",
