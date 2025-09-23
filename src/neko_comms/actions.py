@@ -13,6 +13,9 @@ from typing import Callable, Tuple, List, Optional, Dict, Any
 
 from .types import Action, BUTTON_CODES, name_keysym, clamp_xy, ACTION_SPACES
 
+
+COMPLETION_ACTIONS = {"DONE"}
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +48,10 @@ def safe_parse_action(output_text: str, nav_mode: str = "web", logger: Optional[
     try:
         assert isinstance(act, dict)
         typ = act.get("action")
-        if typ not in ACTION_SPACES.get(nav_mode, []):
+        if typ in COMPLETION_ACTIONS:
+            act.setdefault("value", None)
+            act.setdefault("position", None)
+        elif typ not in ACTION_SPACES.get(nav_mode, []):
             if logger:
                 logger.warning("Non-whitelisted action: %r", typ)
             if parse_errors_counter:

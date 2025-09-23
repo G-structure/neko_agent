@@ -15,7 +15,6 @@ Refactored from original agent.py to use modular neko_comms library.
 """
 
 import asyncio
-import ast
 import json
 import logging
 import os
@@ -25,11 +24,12 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from distutils.util import strtobool
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
 import requests
-from PIL import Image, ImageDraw, ImageFont
+import torch
+from PIL import Image
 from metrics import (
     frames_received, actions_executed, parse_errors, navigation_steps,
     inference_latency, reconnects, resize_duration, start_metrics_server
@@ -37,7 +37,7 @@ from metrics import (
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
 from neko_comms import WebRTCNekoClient, safe_parse_action
-from neko_comms.types import ACTION_SPACES
+from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
 
 
@@ -57,6 +57,7 @@ class Settings:
     max_steps: int
     audio_default: bool
     refinement_steps: int
+    inference_timeout: float
 
     # Logging configuration
     log_level: str
@@ -100,16 +101,23 @@ class Settings:
         if click_save_path and not os.path.isabs(click_save_path):
             click_save_path = f"/tmp/neko-agent/{click_save_path}"
 
+        audio_raw = os.environ.get("NEKO_AUDIO", "1")
+        try:
+            audio_default = bool(strtobool(audio_raw))
+        except (AttributeError, ValueError):
+            audio_default = audio_raw.strip().lower() not in {"0", "false", "off", "no", ""}
+
         return cls(
             repo_id=os.environ.get("REPO_ID", "showlab/ShowUI-2B"),
             size_shortest_edge=int(os.environ.get("SIZE_SHORTEST_EDGE", "224")),
             size_longest_edge=int(os.environ.get("SIZE_LONGEST_EDGE", "1344")),
             max_steps=int(os.environ.get("NEKO_MAX_STEPS", "8")),
-            audio_default=bool(int(os.environ.get("NEKO_AUDIO", "1"))),
+            audio_default=audio_default,
             frame_save_path=frame_save_path,
             click_save_path=click_save_path,
             offload_folder=os.environ.get("OFFLOAD_FOLDER", "./offload"),
             refinement_steps=int(os.environ.get("REFINEMENT_STEPS", "5")),
+            inference_timeout=float(os.environ.get("NEKO_INFERENCE_TIMEOUT", "120")),
             log_file=os.environ.get("NEKO_LOGFILE"),
             log_level=os.environ.get("NEKO_LOGLEVEL", "INFO"),
             log_format=os.environ.get("NEKO_LOG_FORMAT", "text").lower(),
@@ -131,6 +139,8 @@ class Settings:
             errors.append("NEKO_MAX_STEPS must be positive")
         if self.refinement_steps <= 0:
             errors.append("REFINEMENT_STEPS must be positive")
+        if self.inference_timeout <= 0:
+            errors.append("NEKO_INFERENCE_TIMEOUT must be positive")
         if self.metrics_port <= 0 or self.metrics_port > 65535:
             errors.append("Metrics port must be between 1 and 65535")
         if self.log_format not in ("text", "json"):
@@ -397,7 +407,9 @@ class NekoAgent:
         self.action_history = []
 
         # Build system prompt
-        action_space_desc = "\n".join([f"- {a}: {desc}" for a, desc in ACTION_SPACES.get(self.nav_mode, {}).items()])
+        action_space_desc = ACTION_SPACE_DESC.get(
+            self.nav_mode, ACTION_SPACE_DESC.get("web", "")
+        )
         system_prompt = _NAV_SYSTEM.format(
             _APP=self.nav_mode,
             _ACTION_SPACE=action_space_desc
@@ -457,40 +469,82 @@ class NekoAgent:
             await self._send_chat(f"Task incomplete after {self.max_steps} steps: {task}")
 
     async def _generate_action(self, frame: Image.Image, task: str, system_prompt: str) -> Optional[Dict[str, Any]]:
-        """Generate action using the vision model.
+        """Generate action using the vision model."""
 
-        :param frame: Current screen frame
-        :param task: Task description
-        :param system_prompt: System prompt for the model
-        :return: Action dictionary or None if generation fails
-        """
-        # Build conversation with history
-        conversation = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Task: {task}\n\nCurrent observation:"}
-        ]
+        full_size = frame.size
+        crop_box = (0, 0, full_size[0], full_size[1])
+        final_action: Optional[Dict[str, Any]] = None
 
-        # Add action history
-        if self.action_history:
-            history_text = "Previous actions:\n"
-            for i, act in enumerate(self.action_history[-5:], 1):  # Last 5 actions
-                history_text += f"{i}. {act}\n"
-            conversation.append({"role": "assistant", "content": history_text})
+        for iteration in range(self.settings.refinement_steps):
+            current_frame = frame.crop(crop_box)
+            output_text = await self._run_model_inference(
+                current_frame,
+                task,
+                system_prompt,
+                crop_box,
+                iteration,
+                full_size,
+            )
 
-        # Prepare inputs
+            if not output_text:
+                break
+
+            self.logger.debug("Model output: %s", output_text)
+            action = safe_parse_action(output_text, self.nav_mode, self.logger, parse_errors)
+            if not action:
+                self.logger.warning("Failed to generate valid action")
+                break
+
+            final_action = action
+            action_type = action.get("action")
+
+            if action_type == "DONE":
+                break
+
+            if action_type == "CLICK":
+                normalized = self._normalize_click_position(action, crop_box, full_size)
+                if normalized:
+                    final_action["position"] = normalized
+                    if iteration < self.settings.refinement_steps - 1:
+                        next_box = self._compute_refinement_box(normalized, crop_box, full_size)
+                        if next_box:
+                            crop_box = next_box
+                            continue
+                break
+
+            # No refinement for other action types
+            break
+
+        return final_action
+
+    async def _run_model_inference(
+        self,
+        image: Image.Image,
+        task: str,
+        system_prompt: str,
+        crop_box: Tuple[int, int, int, int],
+        iteration: int,
+        full_size: Tuple[int, int],
+    ) -> Optional[str]:
+        """Run the vision-language model and return the raw output text."""
+
+        conversation = self._build_conversation(task, system_prompt, crop_box, iteration, full_size)
+
+        future: Optional[asyncio.Future[str]] = None
         try:
-            text_input = self.processor.apply_chat_template(conversation, add_generation_prompt=True)
+            text_input = self.processor.apply_chat_template(
+                conversation, add_generation_prompt=True
+            )
             inputs = self.processor(
                 text=[text_input],
-                images=[frame],
+                images=[image],
                 padding=True,
-                return_tensors="pt"
+                return_tensors="pt",
             ).to(self.model.device)
 
-            # Run inference in thread pool to avoid blocking
             loop = asyncio.get_running_loop()
 
-            def _inference():
+            def _inference() -> str:
                 with torch.no_grad():
                     t0 = time.monotonic()
                     output_ids = self.model.generate(
@@ -498,26 +552,147 @@ class NekoAgent:
                         max_new_tokens=256,
                         do_sample=False,
                         temperature=0.0,
-                        pad_token_id=self.processor.tokenizer.eos_token_id
+                        pad_token_id=self.processor.tokenizer.eos_token_id,
                     )
                     inference_latency.observe(time.monotonic() - t0)
-
                     output_text = self.processor.decode(
-                        output_ids[0][len(inputs['input_ids'][0]):],
-                        skip_special_tokens=True
+                        output_ids[0][len(inputs["input_ids"][0]):],
+                        skip_special_tokens=True,
                     ).strip()
                     return output_text
 
-            output_text = await loop.run_in_executor(self.executor, _inference)
-            self.logger.debug("Model output: %s", output_text)
-
-            # Parse action
-            action = safe_parse_action(output_text, self.nav_mode, self.logger, parse_errors)
-            return action
-
-        except Exception as e:
-            self.logger.error("Inference failed: %s", e)
+            future = loop.run_in_executor(self.executor, _inference)
+            output_text = await asyncio.wait_for(
+                future, timeout=self.settings.inference_timeout
+            )
+            return output_text
+        except asyncio.TimeoutError:
+            if future:
+                future.cancel()
+            self.logger.error(
+                "Model inference timed out after %.1fs", self.settings.inference_timeout
+            )
+            parse_errors.inc()
             return None
+        except Exception as e:
+            self.logger.error("Inference failed: %s", e, exc_info=True)
+            parse_errors.inc()
+            return None
+
+    def _build_conversation(
+        self,
+        task: str,
+        system_prompt: str,
+        crop_box: Tuple[int, int, int, int],
+        iteration: int,
+        full_size: Tuple[int, int],
+    ) -> List[Dict[str, str]]:
+        """Construct the prompt conversation with optional refinement context."""
+
+        if iteration == 0:
+            user_text = f"Task: {task}\n\nCurrent observation:"
+        else:
+            full_w, full_h = full_size
+            crop_w = max(crop_box[2] - crop_box[0], 1)
+            crop_h = max(crop_box[3] - crop_box[1], 1)
+            cx = ((crop_box[0] + crop_box[2]) / 2) / full_w if full_w else 0.5
+            cy = ((crop_box[1] + crop_box[3]) / 2) / full_h if full_h else 0.5
+            span_x = crop_w / full_w if full_w else 1.0
+            span_y = crop_h / full_h if full_h else 1.0
+            user_text = (
+                f"Task: {task}\n\n"
+                f"Refinement pass {iteration + 1} of {self.settings.refinement_steps} "
+                f"zoomed near normalized coords ({cx:.2f}, {cy:.2f}) "
+                f"with approx span ({span_x:.2f}, {span_y:.2f}).\n\nCurrent observation:"
+            )
+
+        conversation: List[Dict[str, str]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
+
+        if self.action_history:
+            history_lines = [
+                f"{idx}. {json.dumps(act, ensure_ascii=False)}"
+                for idx, act in enumerate(self.action_history[-5:], 1)
+            ]
+            conversation.append(
+                {
+                    "role": "assistant",
+                    "content": "Previous actions:\n" + "\n".join(history_lines),
+                }
+            )
+
+        return conversation
+
+    @staticmethod
+    def _normalize_click_position(
+        action: Dict[str, Any],
+        crop_box: Tuple[int, int, int, int],
+        full_size: Tuple[int, int],
+    ) -> Optional[List[float]]:
+        """Convert crop-local click coordinates to full-frame normalized coordinates."""
+
+        position = action.get("position")
+        if not (isinstance(position, list) and len(position) == 2):
+            return None
+
+        try:
+            local_x = float(position[0])
+            local_y = float(position[1])
+        except (TypeError, ValueError):
+            return None
+
+        left, top, right, bottom = crop_box
+        crop_w = max(right - left, 1)
+        crop_h = max(bottom - top, 1)
+        full_w, full_h = full_size
+        if full_w <= 0 or full_h <= 0:
+            return None
+
+        local_x = min(max(local_x, 0.0), 1.0)
+        local_y = min(max(local_y, 0.0), 1.0)
+
+        abs_x = left + local_x * crop_w
+        abs_y = top + local_y * crop_h
+
+        norm_x = min(max(abs_x / full_w, 0.0), 1.0)
+        norm_y = min(max(abs_y / full_h, 0.0), 1.0)
+        return [norm_x, norm_y]
+
+    @staticmethod
+    def _compute_refinement_box(
+        normalized: List[float],
+        current_box: Tuple[int, int, int, int],
+        full_size: Tuple[int, int],
+        crop_ratio: float = 0.5,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """Compute the next crop box centered around the normalized coordinate."""
+
+        full_w, full_h = full_size
+        if full_w <= 0 or full_h <= 0:
+            return None
+
+        curr_w = current_box[2] - current_box[0]
+        curr_h = current_box[3] - current_box[1]
+        if curr_w <= 32 and curr_h <= 32:
+            return None
+
+        new_w = max(int(curr_w * crop_ratio), 32)
+        new_h = max(int(curr_h * crop_ratio), 32)
+
+        center_x = min(max(normalized[0], 0.0), 1.0) * full_w
+        center_y = min(max(normalized[1], 0.0), 1.0) * full_h
+
+        left = int(max(0, min(center_x - new_w / 2, full_w - new_w)))
+        top = int(max(0, min(center_y - new_h / 2, full_h - new_h)))
+        right = min(full_w, left + new_w)
+        bottom = min(full_h, top + new_h)
+
+        if right - left <= 0 or bottom - top <= 0:
+            return None
+
+        return (left, top, int(right), int(bottom))
 
     async def _execute_action(self, action: Dict[str, Any], frame: Image.Image) -> None:
         """Execute an action using the action executor.

@@ -195,6 +195,7 @@ class NekoCapture:
         self._episode: Optional[EpisodeBuffer] = None
         self._episode_last_ts: float = 0.0
         self._poll_thread: Optional[threading.Thread] = None
+        self._poll_stop_event: Optional[threading.Event] = None
         self._agent_meta = {"source": "neko+capture_refactored", "notes": "refactored using neko_comms"}
 
         # Stop event
@@ -206,6 +207,7 @@ class NekoCapture:
 
         # Connect to Neko server
         await self.neko.connect()
+        self.neko.add_chat_listener(self._process_chat_message)
 
         try:
             # Listen for chat messages
@@ -216,10 +218,6 @@ class NekoCapture:
 
     async def _chat_listener(self) -> None:
         """Listen for chat commands and action annotations."""
-        # Override the client's chat message handler
-        original_handler = self.neko._handle_chat_message
-        self.neko._handle_chat_message = self._process_chat_message
-
         # Keep running until stopped
         while not self._stop_event.is_set():
             await asyncio.sleep(0.1)
@@ -228,9 +226,6 @@ class NekoCapture:
             if self._episode and time.time() - self._episode_last_ts > self.episode_timeout:
                 log.warning("Episode timeout - auto-ending")
                 self._end_episode("timeout")
-
-        # Restore original handler
-        self.neko._handle_chat_message = original_handler
 
     def _process_chat_message(self, content: str, msg: Dict[str, Any]) -> None:
         """Process chat messages for capture commands.
@@ -285,8 +280,10 @@ class NekoCapture:
         log.info("Episode %s started: %s", episode_id, task_text)
 
         # Start screenshot polling thread
+        self._poll_stop_event = threading.Event()
         self._poll_thread = threading.Thread(
             target=self._screenshot_poller,
+            args=(self._poll_stop_event,),
             name="screenshot-poll",
             daemon=True,
         )
@@ -304,10 +301,11 @@ class NekoCapture:
         self._episode = None
 
         # Stop screenshot polling
-        if self._poll_thread:
-            self.neko.stop()
+        if self._poll_thread and self._poll_stop_event:
+            self._poll_stop_event.set()
             self._poll_thread.join(timeout=3.0)
             self._poll_thread = None
+            self._poll_stop_event = None
 
         # Check if episode meets minimum requirements
         if episode.frame_count >= self.min_frames:
@@ -335,17 +333,18 @@ class NekoCapture:
         except Exception as e:
             log.warning("Failed to clean up episode dir: %s", e)
 
-    def _screenshot_poller(self) -> None:
+    def _screenshot_poller(self, stop_event: threading.Event) -> None:
         """Background thread that polls screenshots at fixed FPS."""
         interval = 1.0 / self.fps
 
-        while not self.neko._stop_event.is_set() and self._episode:
+        while not stop_event.is_set() and self._episode:
             start_time = time.time()
 
             # Get screenshot
             img = self.neko.get_screenshot(self.jpeg_quality)
             if img and self._episode:
                 self._episode.add_frame(img, self.jpeg_quality)
+                self._episode_last_ts = time.time()
 
             # Sleep for remaining interval
             elapsed = time.time() - start_time
@@ -360,6 +359,10 @@ class NekoCapture:
         # End any active episode
         if self._episode:
             self._end_episode("shutdown")
+
+        if self._poll_stop_event:
+            self._poll_stop_event.set()
+            self._poll_stop_event = None
 
         # Disconnect from Neko
         await self.neko.disconnect()
