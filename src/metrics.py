@@ -6,7 +6,8 @@ for monitoring Neko Agent operations across all components.
 
 import logging
 from typing import Any, Tuple
-from prometheus_client import start_http_server, Counter, Histogram
+
+from prometheus_client import Counter, Histogram, start_http_server
 
 # Metrics definitions
 frames_received = Counter("neko_frames_received_total", "Total video frames received")
@@ -22,9 +23,10 @@ def start_metrics_server(port: int, logger: logging.Logger) -> Tuple[Any, Any]:
     """Start Prometheus metrics server.
 
     :param port: Port number to bind the metrics server to
-    :param logger: Logger instance for recording server startup status
-    :return: Tuple of (server, thread) for clean shutdown
+    :param logger: Logger for status reporting
+    :return: Tuple of (server, thread) handles when available
     """
+
     try:
         ret = start_http_server(port)
         if isinstance(ret, tuple) and len(ret) == 2:
@@ -33,6 +35,6 @@ def start_metrics_server(port: int, logger: logging.Logger) -> Tuple[Any, Any]:
             server, thread = ret, None
         logger.info("Metrics server started on port %d", port)
         return server, thread
-    except Exception as e:
+    except Exception as e:  # pragma: no cover - defensive logging
         logger.error("Failed to start metrics server on port %d: %s", port, e)
         return None, None

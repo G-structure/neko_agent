@@ -15,6 +15,7 @@ Refactored from original agent.py to use modular neko_comms library.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -42,6 +43,16 @@ from utils import setup_logging, resize_and_validate_image, save_atomic, draw_ac
 
 
 # ----------------------
+# Helpers
+# ----------------------
+def _coerce_bool(value: str) -> bool:
+    try:
+        return bool(strtobool(value))
+    except (ValueError, AttributeError):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ----------------------
 # Configuration
 # ----------------------
 @dataclass
@@ -53,11 +64,22 @@ class Settings:
     size_shortest_edge: int
     size_longest_edge: int
 
+    # Network configuration
+    default_ws: Optional[str]
+    neko_ice_policy: str
+    neko_stun_url: str
+    neko_turn_url: Optional[str]
+    neko_turn_user: Optional[str]
+    neko_turn_pass: Optional[str]
+
     # Agent behavior
     max_steps: int
     audio_default: bool
     refinement_steps: int
     inference_timeout: float
+    neko_rtcp_keepalive: bool
+    neko_skip_initial_frames: int
+    force_exit_guard_ms: int
 
     # Logging configuration
     log_level: str
@@ -111,6 +133,12 @@ class Settings:
             repo_id=os.environ.get("REPO_ID", "showlab/ShowUI-2B"),
             size_shortest_edge=int(os.environ.get("SIZE_SHORTEST_EDGE", "224")),
             size_longest_edge=int(os.environ.get("SIZE_LONGEST_EDGE", "1344")),
+            default_ws=os.environ.get("NEKO_WS"),
+            neko_ice_policy=os.environ.get("NEKO_ICE_POLICY", "strict"),
+            neko_stun_url=os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302"),
+            neko_turn_url=os.environ.get("NEKO_TURN_URL"),
+            neko_turn_user=os.environ.get("NEKO_TURN_USER"),
+            neko_turn_pass=os.environ.get("NEKO_TURN_PASS"),
             max_steps=int(os.environ.get("NEKO_MAX_STEPS", "8")),
             audio_default=audio_default,
             frame_save_path=frame_save_path,
@@ -118,6 +146,9 @@ class Settings:
             offload_folder=os.environ.get("OFFLOAD_FOLDER", "./offload"),
             refinement_steps=int(os.environ.get("REFINEMENT_STEPS", "5")),
             inference_timeout=float(os.environ.get("NEKO_INFERENCE_TIMEOUT", "120")),
+            neko_rtcp_keepalive=_coerce_bool(os.environ.get("NEKO_RTCP_KEEPALIVE", "0")),
+            neko_skip_initial_frames=int(os.environ.get("NEKO_SKIP_INITIAL_FRAMES", "5")),
+            force_exit_guard_ms=int(os.environ.get("NEKO_FORCE_EXIT_GUARD_MS", "0")),
             log_file=os.environ.get("NEKO_LOGFILE"),
             log_level=os.environ.get("NEKO_LOGLEVEL", "INFO"),
             log_format=os.environ.get("NEKO_LOG_FORMAT", "text").lower(),
@@ -141,6 +172,10 @@ class Settings:
             errors.append("REFINEMENT_STEPS must be positive")
         if self.inference_timeout <= 0:
             errors.append("NEKO_INFERENCE_TIMEOUT must be positive")
+        if self.neko_skip_initial_frames < 0:
+            errors.append("NEKO_SKIP_INITIAL_FRAMES must be >= 0")
+        if self.neko_ice_policy not in ("strict", "all"):
+            errors.append("NEKO_ICE_POLICY must be 'strict' or 'all'")
         if self.metrics_port <= 0 or self.metrics_port > 65535:
             errors.append("Metrics port must be between 1 and 65535")
         if self.log_format not in ("text", "json"):
@@ -259,11 +294,25 @@ class NekoAgent:
         self.action_history: List[Dict[str, Any]] = []
         self.shutdown = asyncio.Event()
 
-        # WebRTC client
+        # WebRTC client configuration mirrors the legacy agent defaults
+        ice_servers: List[Any] = []
+        if self.settings.neko_stun_url:
+            ice_servers.append(self.settings.neko_stun_url)
+        if self.settings.neko_turn_url:
+            turn_entry: Dict[str, Any] = {"urls": self.settings.neko_turn_url}
+            if self.settings.neko_turn_user and self.settings.neko_turn_pass:
+                turn_entry["username"] = self.settings.neko_turn_user
+                turn_entry["credential"] = self.settings.neko_turn_pass
+            ice_servers.append(turn_entry)
+
         self.client = WebRTCNekoClient(
             ws_url=ws_url,
+            ice_servers=ice_servers,
+            ice_policy=self.settings.neko_ice_policy,
+            enable_audio=self.audio_enabled,
+            rtcp_keepalive=self.settings.neko_rtcp_keepalive,
             auto_host=True,
-            request_media=True
+            request_media=True,
         )
 
         # Executor for model inference
@@ -276,6 +325,8 @@ class NekoAgent:
     async def run(self) -> None:
         """Main agent run loop."""
         self.logger.info("Starting Neko agent")
+        if self.settings.run_id:
+            self.logger.info("Run ID: %s", self.settings.run_id)
 
         # Set up signal handlers
         loop = asyncio.get_running_loop()
@@ -415,6 +466,8 @@ class NekoAgent:
             _ACTION_SPACE=action_space_desc
         )
 
+        await self._drain_initial_frames()
+
         for step in range(self.max_steps):
             if not self.running:
                 break
@@ -467,6 +520,21 @@ class NekoAgent:
         if self.step_count >= self.max_steps:
             self.logger.warning("Maximum steps reached without completion")
             await self._send_chat(f"Task incomplete after {self.max_steps} steps: {task}")
+
+    async def _drain_initial_frames(self) -> None:
+        """Discard initial frames to mirror legacy warmup behaviour."""
+
+        skip = self.settings.neko_skip_initial_frames
+        if skip <= 0:
+            return
+
+        for _ in range(skip):
+            try:
+                frame = await self.client.frame_source.wait_for_frame(timeout=2.0)
+            except Exception:
+                break
+            if not frame:
+                break
 
     async def _generate_action(self, frame: Image.Image, task: str, system_prompt: str) -> Optional[Dict[str, Any]]:
         """Generate action using the vision model."""
@@ -705,8 +773,11 @@ class NekoAgent:
             return
 
         try:
+            executor = getattr(self.client, 'action_executor', None)
+            if executor is None:
+                raise RuntimeError('Action executor not ready')
             # Execute via WebRTCNekoClient's action executor
-            await self.client.action_executor.execute_action(action, frame.size)
+            await executor.execute_action(action, frame.size)
 
             actions_executed.labels(action_type=action_type).inc()
             self.logger.info("Executed action: %s", action)
@@ -749,7 +820,10 @@ class NekoAgent:
         :param text: Message text to send
         """
         try:
-            await self.client.signaler.send({
+            signaler = getattr(self.client, "signaler", None)
+            if signaler is None:
+                return
+            await signaler.send({
                 "event": "chat/message",
                 "payload": {"text": f"[agent] {text}"}
             })
@@ -765,7 +839,35 @@ class NekoAgent:
             self.executor.shutdown(wait=True, cancel_futures=True)
 
         # Disconnect client
-        await self.client.disconnect()
+        with contextlib.suppress(Exception):
+            await self.client.disconnect()
+
+        # Stop metrics server like the legacy agent
+        ms = getattr(self, "_metrics_server", None)
+        mt = getattr(self, "_metrics_thread", None)
+        if ms is not None:
+            with contextlib.suppress(Exception):
+                if hasattr(ms, "shutdown"):
+                    ms.shutdown()
+                if hasattr(ms, "server_close"):
+                    ms.server_close()
+        if mt is not None:
+            with contextlib.suppress(Exception):
+                mt.join(timeout=1.0)
+        self._metrics_server = None
+        self._metrics_thread = None
+
+        await asyncio.sleep(0.2)
+        if self.settings.force_exit_guard_ms > 0:
+            await asyncio.sleep(self.settings.force_exit_guard_ms / 1000.0)
+            import os as _os, threading as _threading
+            active = [t for t in _threading.enumerate()
+                      if t.is_alive() and t is not _threading.current_thread() and not t.daemon]
+            if active:
+                names = [t.name for t in active]
+                self.logger.warning("Non-daemon threads still active: %s", names)
+                self.logger.info("Forcing process exit now to avoid hang")
+                _os._exit(0)
 
         self.logger.info("Agent cleanup complete")
 

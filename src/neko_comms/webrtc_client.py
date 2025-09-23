@@ -44,7 +44,7 @@ class WebRTCNekoClient(NekoClient):
     Supports both inbound video and outbound audio tracks.
     """
 
-    def __init__(self, ws_url: str, ice_servers: Optional[List[str]] = None, **kwargs):
+    def __init__(self, ws_url: str, ice_servers: Optional[List[Any]] = None, **kwargs):
         """Initialize the WebRTC Neko client.
 
         :param ws_url: WebSocket URL for signaling
@@ -227,7 +227,12 @@ class WebRTCNekoClient(NekoClient):
 
     async def _setup_peer_connection(self) -> None:
         """Initialize the WebRTC peer connection with ICE servers."""
-        ice_servers = [RTCIceServer(urls=url) for url in self.ice_servers]
+        ice_servers: List[RTCIceServer] = []
+        for entry in self.ice_servers:
+            if isinstance(entry, dict):
+                ice_servers.append(RTCIceServer(**entry))
+            else:
+                ice_servers.append(RTCIceServer(urls=entry))
         config = RTCConfiguration(iceServers=ice_servers)
 
         if self.ice_policy == "strict":
