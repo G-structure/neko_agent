@@ -908,6 +908,8 @@ PY
 
             # Registry configuration - can be overridden via environment
             REGISTRY=''${NEKO_REGISTRY:-ghcr.io/your-org}
+            REGISTRY_LOCAL=''${REGISTRY_LOCAL:-false}
+            REGISTRY_LOCAL_URL=''${REGISTRY_LOCAL_URL:-localhost:5000/neko}
             TTL=''${NEKO_TTL:-}
             PUSH_IMAGE=''${NEKO_PUSH:-true}
             VARIANT=''${NEKO_VARIANT:-generic}  # generic (CPU) or opt (GPU)
@@ -916,6 +918,9 @@ PY
             echo "=========================================="
             echo "Build: ${buildInfo.version} (${buildInfo.timestamp})"
             echo "Registry: $REGISTRY"
+            if [ "$REGISTRY_LOCAL" = "true" ]; then
+              echo "Registry Local: true (push to $REGISTRY_LOCAL_URL)"
+            fi
             echo "Variant: $VARIANT"
             echo "VMM URL: ''${DSTACK_VMM_URL:-not set}"
             echo ""
@@ -963,27 +968,39 @@ PY
               esac
             }
 
-            # Get registry configuration
-            REGISTRY_CONFIG=$(get_registry_config "$REGISTRY")
+            # Determine push registry and compose registry
+            if [ "$REGISTRY_LOCAL" = "true" ]; then
+              PUSH_REGISTRY="$REGISTRY_LOCAL_URL"
+              COMPOSE_REGISTRY="$REGISTRY"
+              echo "🏠 Using local registry for push: $PUSH_REGISTRY"
+              echo "🌐 Using funnel registry for compose: $COMPOSE_REGISTRY"
+            else
+              PUSH_REGISTRY="$REGISTRY"
+              COMPOSE_REGISTRY="$REGISTRY"
+            fi
+
+            # Get registry configuration for push registry
+            REGISTRY_CONFIG=$(get_registry_config "$PUSH_REGISTRY")
             eval "$REGISTRY_CONFIG"
 
             # Generate image name based on registry type
             if [ "''${anonymous:-false}" = "true" ]; then
               IMAGE_UUID=$(generate_uuid)
               if [ -n "$TTL" ]; then
-                IMAGE_NAME="$REGISTRY/$IMAGE_UUID:$TTL"
-                DEPLOY_IMAGE_NAME="$REGISTRY/$IMAGE_UUID:$TTL"
+                IMAGE_NAME="$PUSH_REGISTRY/$IMAGE_UUID:$TTL"
+                DEPLOY_IMAGE_NAME="$COMPOSE_REGISTRY/$IMAGE_UUID:$TTL"
               else
-                IMAGE_NAME="$REGISTRY/$IMAGE_UUID:${buildInfo.shortRev}"
-                DEPLOY_IMAGE_NAME="$REGISTRY/$IMAGE_UUID:${buildInfo.shortRev}"
+                IMAGE_NAME="$PUSH_REGISTRY/$IMAGE_UUID:${buildInfo.shortRev}"
+                DEPLOY_IMAGE_NAME="$COMPOSE_REGISTRY/$IMAGE_UUID:${buildInfo.shortRev}"
               fi
               echo "🎲 Anonymous registry detected, using UUID: $IMAGE_UUID"
             else
-              IMAGE_NAME="$REGISTRY/neko-agent:opt-${buildInfo.shortRev}"
-              DEPLOY_IMAGE_NAME="$IMAGE_NAME"
+              IMAGE_NAME="$PUSH_REGISTRY/neko-agent:opt-${buildInfo.shortRev}"
+              DEPLOY_IMAGE_NAME="$COMPOSE_REGISTRY/neko-agent:opt-${buildInfo.shortRev}"
             fi
 
-            echo "📦 Target image: $IMAGE_NAME"
+            echo "📦 Push image: $IMAGE_NAME"
+            echo "📦 Compose image: $DEPLOY_IMAGE_NAME"
 
             # Step 1: Build reproducible images
             echo "📦 Building reproducible images..."
@@ -1018,22 +1035,25 @@ PY
               echo "🎮 GPU capabilities: $GPU_CAPABILITIES"
             fi
 
-            # Update DEPLOY_IMAGE_NAME to use the correct registry-based name when push fails
-            DEPLOY_IMAGE_NAME="$IMAGE_NAME"
-
             # Step 3: Tag and optionally push to target registry
             if [ "$PUSH_IMAGE" = "true" ]; then
-              echo "🏷️  Tagging image for target registry..."
+              echo "🏷️  Tagging image for push registry..."
               docker tag "$GENERIC_IMAGE" "$IMAGE_NAME"
 
-              echo "📤 Pushing to registry: $REGISTRY"
-              if [ "''${auth_required:-true}" = "true" ] && [ "''${anonymous:-false}" != "true" ]; then
-                echo "🔐 Authentication may be required for $REGISTRY"
-                echo "   Make sure you're logged in with: docker login $REGISTRY"
+              if [ "$REGISTRY_LOCAL" = "true" ]; then
+                echo "📤 Pushing to local registry: $PUSH_REGISTRY"
+                echo "🔐 Authentication may be required for $PUSH_REGISTRY"
+                echo "   Make sure you're logged in with: docker login $PUSH_REGISTRY"
+              else
+                echo "📤 Pushing to registry: $PUSH_REGISTRY"
+                if [ "''${auth_required:-true}" = "true" ] && [ "''${anonymous:-false}" != "true" ]; then
+                  echo "🔐 Authentication may be required for $PUSH_REGISTRY"
+                  echo "   Make sure you're logged in with: docker login $PUSH_REGISTRY"
+                fi
               fi
 
               # Special handling for ttl.sh - show the one-liner approach
-              if [[ "$REGISTRY" == ttl.sh* ]]; then
+              if [[ "$PUSH_REGISTRY" == ttl.sh* ]]; then
                 echo "💡 ttl.sh one-liner approach:"
                 echo "   IMAGE=$IMAGE_UUID"
                 echo "   docker build -t ttl.sh/\$IMAGE:''${TTL:-1h} ."
@@ -1042,30 +1062,42 @@ PY
 
               if docker push "$IMAGE_NAME"; then
                 echo "✅ Image pushed successfully"
-                DEPLOY_IMAGE_NAME="$IMAGE_NAME"
               else
-                echo "⚠️  Push failed, using local image"
-                # Keep using the target registry name even if push failed
-                # The image is tagged locally with the target name
-                DEPLOY_IMAGE_NAME="$IMAGE_NAME"
+                echo "⚠️  Push failed, but will continue with local image"
               fi
             else
               echo "🚫 Skipping image push (NEKO_PUSH=false)"
-              # Tag the image locally with the target registry name
+              # Tag the image locally with the push registry name
               docker tag "$GENERIC_IMAGE" "$IMAGE_NAME"
-              DEPLOY_IMAGE_NAME="$IMAGE_NAME"
             fi
 
             # Step 4: Generate app-compose with appropriate image reference
             echo "⚙️  Generating app-compose with pinned digests..."
 
-            # Use digest pinning for registries that support it
-            if [ "''${supports_digests:-true}" = "true" ] && [ "$PUSH_IMAGE" = "true" ]; then
+            # When using local registry, we can't use digests from the pushed image
+            # because the compose file needs to reference the funnel URL
+            if [ "$REGISTRY_LOCAL" = "true" ]; then
+              FINAL_IMAGE_REF="$DEPLOY_IMAGE_NAME"
+              echo "🏠 Local registry mode: Using compose registry reference: $FINAL_IMAGE_REF"
+            elif [ "''${supports_digests:-true}" = "true" ] && [ "$PUSH_IMAGE" = "true" ]; then
               # Try to get the pushed image digest
               PUSHED_DIGEST=$(docker inspect "$IMAGE_NAME" --format='{{index .RepoDigests 0}}' 2>/dev/null || echo "")
               if [ -n "$PUSHED_DIGEST" ]; then
-                FINAL_IMAGE_REF="$PUSHED_DIGEST"
-                echo "🔒 Using digest pinning: $FINAL_IMAGE_REF"
+                # Convert the pushed digest to use the compose registry hostname
+                if [ "$PUSH_REGISTRY" != "$COMPOSE_REGISTRY" ]; then
+                  # Extract the digest part and combine with compose registry
+                  DIGEST_PART=$(echo "$PUSHED_DIGEST" | grep -o '@sha256:[a-f0-9]*' || echo "")
+                  if [ -n "$DIGEST_PART" ]; then
+                    FINAL_IMAGE_REF="$COMPOSE_REGISTRY/neko-agent$DIGEST_PART"
+                    echo "🔒 Using digest pinning with compose registry: $FINAL_IMAGE_REF"
+                  else
+                    FINAL_IMAGE_REF="$DEPLOY_IMAGE_NAME"
+                    echo "📌 Using tag reference: $FINAL_IMAGE_REF"
+                  fi
+                else
+                  FINAL_IMAGE_REF="$PUSHED_DIGEST"
+                  echo "🔒 Using digest pinning: $FINAL_IMAGE_REF"
+                fi
               else
                 FINAL_IMAGE_REF="$DEPLOY_IMAGE_NAME"
                 echo "📌 Using tag reference: $FINAL_IMAGE_REF"
@@ -1144,7 +1176,7 @@ EOF
             echo "📋 Metadata:"
             cat compose-metadata.json | ${pkgs-app.jq}/bin/jq .
 
-            # Step 5: Deploy with vmm-cli (using overlay)
+            # Step 5: Deploy with vmm-cli (using overlay) - following justfile pattern
             echo "🚀 Deploying to TEE..."
 
             # Show registry-specific information
@@ -1158,19 +1190,40 @@ EOF
             APP_ID=$(echo -n "$COMPOSE_HASH" | cut -c1-40)
             echo "App ID: $APP_ID"
 
-            # Build vmm-cli command with conditional GPU allocation
+            # Step 5a: First run vmm-cli compose to generate the proper compose file with gateway/KMS settings
+            echo "🔧 Running vmm-cli compose to embed gateway and KMS settings..."
+            COMPOSE_CMD="${pkgs-app.vmm-cli}/bin/vmm-cli compose"
+            COMPOSE_CMD="$COMPOSE_CMD --name neko-reproducible"
+            COMPOSE_CMD="$COMPOSE_CMD --docker-compose ./neko-app-compose.json"
+            COMPOSE_CMD="$COMPOSE_CMD --gateway"
+            COMPOSE_CMD="$COMPOSE_CMD --kms"
+            COMPOSE_CMD="$COMPOSE_CMD --public-logs"
+            COMPOSE_CMD="$COMPOSE_CMD --public-sysinfo"
+            COMPOSE_CMD="$COMPOSE_CMD --output ./neko-vmm-compose.json"
+
+            echo "🚀 VMM Compose Command: $COMPOSE_CMD"
+
+            if ! eval "$COMPOSE_CMD"; then
+                echo "❌ vmm-cli compose failed"
+                echo "⚠️  Generated files for manual deployment:"
+                echo "   - neko-app-compose.json"
+                echo "   - compose-metadata.json"
+                exit 1
+            fi
+
+            # Step 5b: Now run vmm-cli deploy with the processed compose file
+            echo "🚀 Running vmm-cli deploy..."
             VMM_CMD="${pkgs-app.vmm-cli}/bin/vmm-cli deploy"
             VMM_CMD="$VMM_CMD --name neko-reproducible-''${USER:-unknown}"
             VMM_CMD="$VMM_CMD --image dstack-nvidia-0.5.3"
-            VMM_CMD="$VMM_CMD --compose ./neko-app-compose.json"
+            VMM_CMD="$VMM_CMD --compose ./neko-vmm-compose.json"
             VMM_CMD="$VMM_CMD --vcpu 4"
             VMM_CMD="$VMM_CMD --memory 8G"
             VMM_CMD="$VMM_CMD --disk 50G"
-            VMM_CMD="$VMM_CMD --gateway"
-            VMM_CMD="$VMM_CMD --kms"
-            VMM_CMD="$VMM_CMD --public-logs"
-            VMM_CMD="$VMM_CMD --public-sysinfo"
-
+            #VMM_CMD="$VMM_CMD --gateway"
+            #VMM_CMD="$VMM_CMD --kms"
+            #VMM_CMD="$VMM_CMD --public-logs"
+            #VMM_CMD="$VMM_CMD --public-sysinfo"
             # Add GPU allocation if container requires GPU
             if [ "$GPU_ENABLED" = "true" ]; then
               GPU_MODE=''${NEKO_GPU_MODE:-ppcie}  # ppcie (all GPUs) or specific
@@ -1187,13 +1240,14 @@ EOF
               fi
             fi
 
-            echo "🚀 VMM Command: $VMM_CMD"
+            echo "🚀 VMM Deploy Command: $VMM_CMD"
 
             if eval "$VMM_CMD"; then
                 echo "🎉 Deployment complete!"
             else
                 echo "⚠️  vmm-cli deployment failed. Generated files for manual deployment:"
                 echo "   - neko-app-compose.json"
+                echo "   - neko-vmm-compose.json"
                 echo "   - compose-metadata.json"
             fi
 
@@ -1208,6 +1262,7 @@ EOF
             echo '   GPU specific:       NEKO_VARIANT=opt NEKO_GPU_MODE=specific NEKO_GPU_SLOTS="0a:00.0 1a:00.0" nix run .#deploy-to-tee'
             echo "   ttl.sh + GPU:       NEKO_REGISTRY=ttl.sh NEKO_VARIANT=opt nix run .#deploy-to-tee"
             echo "   Custom registry:    NEKO_REGISTRY=ghcr.io/your-org NEKO_VARIANT=opt nix run .#deploy-to-tee"
+            echo "   Local registry:     REGISTRY_LOCAL=true NEKO_REGISTRY=freiza-1.taildd8a6.ts.net:5000/neko NEKO_VARIANT=opt nix run .#deploy-to-tee"
             echo ""
             echo "🎮 GPU Configuration:"
             echo "   NEKO_GPU_MODE=ppcie     - Use all available GPUs - default for GPU-enabled containers"
