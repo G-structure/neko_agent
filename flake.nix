@@ -323,6 +323,10 @@
               echo "Installing Google Gemini CLI..."
               npm install --engine-strict -g @google/gemini-cli@latest
             fi
+            if [ ! -x "$NPM_CONFIG_PREFIX/bin/slate" ]; then
+              echo "Installing Slate CLI..."
+              npm install -g @randomlabs/slatecli
+            fi
           '';
 
           # CUDA env used by GPU shells
@@ -1163,10 +1167,10 @@ EOF
             VMM_CMD="$VMM_CMD --memory 8G"
             VMM_CMD="$VMM_CMD --disk 50G"
             VMM_CMD="$VMM_CMD --gateway"
-            VMM_CMD="$VMM_CMD --kms" 
+            VMM_CMD="$VMM_CMD --kms"
             VMM_CMD="$VMM_CMD --public-logs"
             VMM_CMD="$VMM_CMD --public-sysinfo"
-            
+
             # Add GPU allocation if container requires GPU
             if [ "$GPU_ENABLED" = "true" ]; then
               GPU_MODE=''${NEKO_GPU_MODE:-ppcie}  # ppcie (all GPUs) or specific
@@ -1182,9 +1186,9 @@ EOF
                 echo "🎮 GPU Mode: Specific slots - $GPU_SLOTS"
               fi
             fi
-            
+
             echo "🚀 VMM Command: $VMM_CMD"
-            
+
             if eval "$VMM_CMD"; then
                 echo "🎉 Deployment complete!"
             else
