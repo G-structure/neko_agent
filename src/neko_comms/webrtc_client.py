@@ -483,16 +483,32 @@ class WebRTCNekoClient(NekoClient):
             member_id = payload.get("member_id")
             logger.debug("Chat message from %s: %s", member_id, content)
 
+    async def send_event(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        """Send a raw event through the signaling channel."""
+        if not self.signaler:
+            raise ConnectionError("Not connected to Neko server")
+
+        message = {"event": event}
+        if payload is not None:
+            message["payload"] = payload
+        await self.signaler.send(message)
+
     async def request_host_control(self) -> None:
         """Request host control from the server."""
         if self.signaler:
-            await self.signaler.send({"event": "control/request"})
+            await self.send_event("control/request")
             logger.info("Requested host control")
+
+    async def release_host_control(self) -> None:
+        """Release host control back to the server."""
+        if self.signaler:
+            await self.send_event("control/release")
+            logger.info("Released host control")
 
     async def send_heartbeat(self) -> None:
         """Send heartbeat to maintain connection."""
         if self.signaler:
-            await self.signaler.send({"event": "system/heartbeat"})
+            await self.send_event("system/heartbeat")
 
     def add_outbound_audio_track(self, audio_track: AudioStreamTrack) -> None:
         """Add an outbound audio track (for yap.py TTS support).
