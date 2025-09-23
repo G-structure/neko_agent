@@ -131,6 +131,15 @@ class Settings:
     # Logging
     log_level: str = os.environ.get("YAP_LOGLEVEL", "INFO")
     log_format: str = os.environ.get("YAP_LOG_FORMAT", "text")
+    log_file: Optional[str] = os.environ.get("YAP_LOGFILE")
+
+    # Metrics / ICE
+    metrics_port: int = int(os.environ.get("YAP_METRICS_PORT", os.environ.get("PORT", "0") or "0"))
+    stun_url: str = os.environ.get("YAP_STUN_URL", "stun:stun.l.google.com:19302")
+    turn_url: Optional[str] = os.environ.get("YAP_TURN_URL")
+    turn_user: Optional[str] = os.environ.get("YAP_TURN_USER")
+    turn_pass: Optional[str] = os.environ.get("YAP_TURN_PASS")
+    ice_policy: str = os.environ.get("YAP_ICE_POLICY", "strict")
 
     def validate(self) -> List[str]:
         """Validate configuration settings.
@@ -144,6 +153,8 @@ class Settings:
             errs.append("YAP_AUDIO_CHANNELS must be 1 or 2.")
         if self.frame_ms not in (10, 20, 30, 40, 60):
             errs.append("YAP_FRAME_MS must be typical Opus frame (10/20/30/40/60).")
+        if self.ice_policy not in ("strict", "all"):
+            errs.append("YAP_ICE_POLICY must be 'strict' or 'all'.")
         return errs
 
 
@@ -677,11 +688,31 @@ class YapApp:
         self.log = logger
         self.running = True
 
+        # Configure optional ICE servers when policy allows it
+        ice_servers: List[Dict[str, Any]] = []
+        if settings.ice_policy != "strict":
+            if settings.stun_url:
+                ice_servers.append({"urls": [settings.stun_url]})
+            if settings.turn_url:
+                entry: Dict[str, Any] = {"urls": [settings.turn_url]}
+                if settings.turn_user:
+                    entry["username"] = settings.turn_user
+                if settings.turn_pass:
+                    entry["credential"] = settings.turn_pass
+                ice_servers.append(entry)
+
+        client_kwargs: Dict[str, Any] = {
+            "auto_host": False,
+            "request_media": False,
+            "ice_policy": settings.ice_policy,
+        }
+        if ice_servers:
+            client_kwargs["ice_servers"] = ice_servers
+
         # Initialize neko client (no media since we're audio-only)
         self.client = WebRTCNekoClient(
             ws_url=self._get_ws_url(),
-            auto_host=False,  # We don't need host control for TTS
-            request_media=False  # We'll add our own audio track
+            **client_kwargs,
         )
 
         # TTS components
@@ -707,7 +738,7 @@ class YapApp:
         self.current_speaker: Optional[str] = settings.default_speaker
         self.current_params: Dict[str, float] = {}
         self._idle_flush_task: Optional[asyncio.Task] = None
-        self._idle_ms = 700
+        self._idle_ms = max(250, int(self.settings.chunk_target_sec * 500))
 
     def _get_ws_url(self) -> str:
         """Get WebSocket URL from settings, handling REST login if needed.
@@ -756,7 +787,7 @@ class YapApp:
             self.log.info("Connected to Neko server")
 
             # Add our audio track to the peer connection
-            self.client.pc.addTrack(self.audio_track)
+            self.client.add_outbound_audio_track(self.audio_track)
             self.log.info("Audio track added to WebRTC connection")
 
             # Start chat listener
@@ -954,13 +985,9 @@ class YapApp:
         :param text: Message text to send
         """
         try:
-            # Use client's message sending capability
-            await self.client.signaler.send({
-                "event": "chat/message",
-                "payload": {"text": f"[yap] {text}"}
-            })
-        except Exception:
-            pass
+            await self.client.send_event("chat/message", {"text": f"[yap] {text}"})
+        except Exception as exc:
+            self.log.debug("Failed to send chat message: %s", exc)
 
 
 # ----------------------
@@ -978,9 +1005,26 @@ async def main():
     parser.add_argument("--username", help="Neko username")
     parser.add_argument("--password", help="Neko password")
     parser.add_argument("--ws", help="Direct WebSocket URL")
-    parser.add_argument("--voices-dir", default="./voices", help="Voice directory")
-    parser.add_argument("--sr", type=int, default=48000, help="Sample rate")
-    parser.add_argument("--channels", type=int, default=1, help="Audio channels")
+    parser.add_argument("--voices-dir", help="Voice directory")
+    parser.add_argument("--sr", type=int, help="Output sample rate")
+    parser.add_argument("--channels", type=int, help="Audio channels (1 or 2)")
+    parser.add_argument("--frame-ms", type=int, help="Audio frame size in milliseconds")
+    parser.add_argument("--parallel", type=int, help="Parallel TTS workers")
+    parser.add_argument("--chunk-sec", type=float, help="Target chunk duration in seconds")
+    parser.add_argument("--max-chars", type=int, help="Maximum characters per chunk")
+    parser.add_argument("--overlap-ms", type=int, help="Crossfade overlap in milliseconds")
+    parser.add_argument("--jitter-max", type=float, help="PCM jitter buffer cap in seconds")
+    parser.add_argument("--default-speaker", help="Default speaker identifier")
+    parser.add_argument("--loglevel", help="Logging level")
+    parser.add_argument("--log-format", choices=("text", "json"), help="Logging format")
+    parser.add_argument("--log-file", help="Optional log file path")
+    parser.add_argument("--stun-url", help="Additional STUN server URL")
+    parser.add_argument("--turn-url", help="TURN server URL")
+    parser.add_argument("--turn-user", help="TURN username")
+    parser.add_argument("--turn-pass", help="TURN password")
+    parser.add_argument("--ice-policy", choices=("strict", "all"), help="ICE transport policy")
+    parser.add_argument("--metrics-port", type=int, help="Metrics server port")
+    parser.add_argument("--healthcheck", action="store_true", help="Validate configuration and exit")
 
     args = parser.parse_args()
 
@@ -996,15 +1040,55 @@ async def main():
         settings.ws_url = args.ws
     if args.voices_dir:
         settings.voices_dir = args.voices_dir
-    settings.sr = args.sr
-    settings.channels = args.channels
+    if args.sr is not None:
+        settings.sr = args.sr
+    if args.channels is not None:
+        settings.channels = args.channels
+    if args.frame_ms is not None:
+        settings.frame_ms = args.frame_ms
+    if args.parallel is not None:
+        settings.parallel = args.parallel
+    if args.chunk_sec is not None:
+        settings.chunk_target_sec = args.chunk_sec
+    if args.max_chars is not None:
+        settings.max_chunk_chars = args.max_chars
+    if args.overlap_ms is not None:
+        settings.overlap_ms = args.overlap_ms
+    if args.jitter_max is not None:
+        settings.jitter_max_sec = args.jitter_max
+    if args.default_speaker:
+        settings.default_speaker = args.default_speaker
+    if args.loglevel:
+        settings.log_level = args.loglevel
+    if args.log_format:
+        settings.log_format = args.log_format
+    if args.log_file:
+        settings.log_file = args.log_file
+    if args.stun_url:
+        settings.stun_url = args.stun_url
+    if args.turn_url:
+        settings.turn_url = args.turn_url
+    if args.turn_user:
+        settings.turn_user = args.turn_user
+    if args.turn_pass:
+        settings.turn_pass = args.turn_pass
+    if args.ice_policy:
+        settings.ice_policy = args.ice_policy
+    if args.metrics_port is not None:
+        settings.metrics_port = args.metrics_port
 
     # Validate settings
     errs = settings.validate()
     if errs:
         for err in errs:
             print(f"Error: {err}", file=sys.stderr)
-        sys.exit(1)
+        if args.healthcheck:
+            raise SystemExit(1)
+        raise SystemExit(1)
+
+    if args.healthcheck:
+        print("yap healthcheck ok")
+        return
 
     # Set up logging and run app
     setup_logging(settings.log_level, settings.log_format, settings.log_file)
