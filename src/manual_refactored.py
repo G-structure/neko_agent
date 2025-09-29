@@ -287,7 +287,7 @@ Keyboard & Text:
   paste [text]            - Paste clipboard or provided text
 
 Raw / Admin:
-  raw '{"event":...}'    - Send raw JSON event
+  raw '{{"event":...}}'    - Send raw JSON event
   host / unhost           - Request or release host control
   force-take              - Force host control (admin)
   force-release           - Force release host control (admin)

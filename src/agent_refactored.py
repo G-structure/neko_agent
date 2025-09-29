@@ -38,7 +38,7 @@ from metrics import (
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
 from neko_comms import WebRTCNekoClient, safe_parse_action
-from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC
+from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
 
 
@@ -599,12 +599,33 @@ class NekoAgent:
     ) -> Optional[str]:
         """Run the vision-language model and return the raw output text."""
 
-        conversation = self._build_conversation(task, system_prompt, crop_box, iteration, full_size)
+        user_text, history_text = self._build_prompt_components(
+            task, crop_box, iteration, full_size
+        )
+
+        segments: List[Dict[str, Any]] = [
+            {"type": "text", "text": system_prompt},
+            {"type": "text", "text": user_text},
+        ]
+        if history_text:
+            segments.append({"type": "text", "text": history_text})
+        segments.append(
+            {
+                "type": "image",
+                "image": image,
+                "size": {
+                    "shortest_edge": self.settings.size_shortest_edge,
+                    "longest_edge": self.settings.size_longest_edge,
+                },
+            }
+        )
+
+        messages = [{"role": "user", "content": segments}]
 
         future: Optional[asyncio.Future[str]] = None
         try:
             text_input = self.processor.apply_chat_template(
-                conversation, add_generation_prompt=True
+                messages, add_generation_prompt=True
             )
             inputs = self.processor(
                 text=[text_input],
@@ -641,7 +662,8 @@ class NekoAgent:
             if future:
                 future.cancel()
             self.logger.error(
-                "Model inference timed out after %.1fs", self.settings.inference_timeout
+                "Model inference timed out after %.1fs",
+                self.settings.inference_timeout,
             )
             parse_errors.inc()
             return None
@@ -650,15 +672,14 @@ class NekoAgent:
             parse_errors.inc()
             return None
 
-    def _build_conversation(
+    def _build_prompt_components(
         self,
         task: str,
-        system_prompt: str,
         crop_box: Tuple[int, int, int, int],
         iteration: int,
         full_size: Tuple[int, int],
-    ) -> List[Dict[str, str]]:
-        """Construct the prompt conversation with optional refinement context."""
+    ) -> Tuple[str, Optional[str]]:
+        """Create the textual components for the multimodal prompt."""
 
         if iteration == 0:
             user_text = f"Task: {task}\n\nCurrent observation:"
@@ -677,24 +698,15 @@ class NekoAgent:
                 f"with approx span ({span_x:.2f}, {span_y:.2f}).\n\nCurrent observation:"
             )
 
-        conversation: List[Dict[str, str]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ]
-
+        history_text: Optional[str] = None
         if self.action_history:
             history_lines = [
                 f"{idx}. {json.dumps(act, ensure_ascii=False)}"
                 for idx, act in enumerate(self.action_history[-5:], 1)
             ]
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "content": "Previous actions:\n" + "\n".join(history_lines),
-                }
-            )
+            history_text = "Previous actions:\n" + "\n".join(history_lines)
 
-        return conversation
+        return user_text, history_text
 
     @staticmethod
     def _normalize_click_position(
@@ -779,8 +791,15 @@ class NekoAgent:
             executor = getattr(self.client, 'action_executor', None)
             if executor is None:
                 raise RuntimeError('Action executor not ready')
-            # Execute via WebRTCNekoClient's action executor
-            await executor.execute_action(action, frame.size)
+
+            action_payload = ActionModel(
+                action=action.get("action"),
+                value=action.get("value"),
+                position=action.get("position"),
+                amount=action.get("amount"),
+            )
+
+            await executor.execute_action(action_payload, frame.size)
 
             actions_executed.labels(action_type=action_type).inc()
             self.logger.info("Executed action: %s", action)

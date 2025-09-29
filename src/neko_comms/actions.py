@@ -32,13 +32,23 @@ def safe_parse_action(output_text: str, nav_mode: str = "web", logger: Optional[
         act = json.loads(output_text)
     except json.JSONDecodeError:
         try:
-            act = ast.literal_eval(output_text)
-        except (ValueError, SyntaxError) as e:
-            if logger:
-                logger.error("Parse error: %s | Raw=%r", e, output_text)
-            if parse_errors_counter:
-                parse_errors_counter.inc()
-            return None
+            normalized = output_text.replace("'", '"')
+            normalized = (
+                normalized
+                .replace('None', 'null')
+                .replace('True', 'true')
+                .replace('False', 'false')
+            )
+            act = json.loads(normalized)
+        except Exception:
+            try:
+                act = ast.literal_eval(output_text)
+            except (ValueError, SyntaxError) as e:
+                if logger:
+                    logger.error("Parse error: %s | Raw=%r", e, output_text)
+                if parse_errors_counter:
+                    parse_errors_counter.inc()
+                return None
 
     if isinstance(act, (tuple, list)) and len(act) > 0:
         if logger:
