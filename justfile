@@ -13,16 +13,45 @@ pydebug:
 
 # Launch the agent with a default task
 agent:
-    NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko1.log" python src/agent.py --task "search for pics of cats"
-#    #!/usr/bin/env bash
-#    cd "{{justfile_directory()}}"
-#    nix develop --command bash -c 'NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko1.log" python src/agent.py --task "search for pics of cats"'
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    if [ -f .env ]; then
+      set -a
+      source .env
+      set +a
+    fi
+    mkdir -p tmp
+    export NEKO_LOGFILE="${NEKO_LOGFILE:-${PWD}/tmp/neko_agent.log}"
+    python src/agent.py --task "${NEKO_TASK:-search for pics of cats}"
 
 # Launch the agent with a custom task
 agent-task task:
     #!/usr/bin/env bash
+    set -euo pipefail
     cd "{{justfile_directory()}}"
-    nix develop --command bash -c 'NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko1.log" python src/agent.py --task "{{task}}"'
+    if [ -f .env ]; then
+      set -a
+      source .env
+      set +a
+    fi
+    mkdir -p tmp
+    export NEKO_LOGFILE="${NEKO_LOGFILE:-${PWD}/tmp/neko_agent.log}"
+    python src/agent.py --task "{{task}}"
+
+# Launch the agent in online chat mode
+agent-online:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    if [ -f .env ]; then
+      set -a
+      source .env
+      set +a
+    fi
+    mkdir -p tmp
+    export NEKO_LOGFILE="${NEKO_LOGFILE:-${PWD}/tmp/neko_agent.log}"
+    python src/agent.py --online
 
 # Force kill the agent script
 kill-agent:
@@ -38,10 +67,17 @@ kill-agent:
 
 # Launch the manual control script
 manual:
-    NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko_manual.log" python src/manual.py
-#    #!/usr/bin/env bash
-#    cd "{{justfile_directory()}}"
-#    nix develop --command bash -c 'NEKO_LOGFILE="/Users/luc/projects/neko_agent/tmp/neko1.log" python src/manual.py'
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    if [ -f .env ]; then
+      set -a
+      source .env
+      set +a
+    fi
+    mkdir -p tmp
+    export NEKO_LOGFILE="${NEKO_LOGFILE:-${PWD}/tmp/neko_manual.log}"
+    python src/manual.py
 
 # Launch the agent via uv with .env
 uv-agent:
@@ -92,7 +128,8 @@ setup:
 
 # View the agent log
 log:
-    tail -f /Users/luc/projects/neko_agent/tmp/neko_agent.log
+    #!/usr/bin/env bash
+    tail -f "{{justfile_directory()}}/tmp/neko_agent.log"
 
 # Show running neko processes
 ps:
@@ -102,7 +139,7 @@ ps:
 clean:
     rm -rf tmp/actions/*
     rm -f tmp/frame.png
-    rm -f tmp/neko1.log
+    rm -f tmp/neko_agent.log tmp/neko_manual.log tmp/neko1.log
     rm -f tmp/*.tmp
 
 # === NEW: Optimized development shells ===
