@@ -361,4 +361,8 @@ nekoOverlays = [
 ];
 ```
 
+### Handling GPU-Heavy Test Suites
+
+Some upstream projects (for example `einops`) ship notebook-based test suites that start long-running CUDA benchmarks. In CI or local builds these checks routinely exceed the sandbox timeout. Our `overlays/einops.nix` patch disables the notebook runner and its specific `test_notebook_3` case, while still allowing the rest of the package to build reproducibly. Always prefer pinpointing the slow tests (via `disabledTestPaths`/`disabledTests`) instead of globally disabling checks so that lightweight import tests keep running.
+
 This guide covers the key patterns for packaging Python dependencies in the Neko Agent project with proper PyTorch ecosystem integration and CUDA support.

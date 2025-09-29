@@ -250,6 +250,12 @@ prometheus-client
 nix develop .#gpu
 ```
 
+> **NVIDIA hosts**: When running outside NixOS you will typically need `nixGL` to expose the system GPU. Use:
+> ```bash
+> NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- nix develop .#gpu
+> ```
+> This wraps the GPU shell with the right OpenGL/EGL libraries from the host driver.
+
 **Additional Features over Default**:
 - **CUDA Toolkit 12.8** - Complete CUDA development environment
 - **cuDNN and NCCL** - Optimized neural network and communication libraries
