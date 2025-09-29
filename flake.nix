@@ -315,18 +315,30 @@
             if [ ! -x "$NPM_CONFIG_PREFIX/bin/codex" ]; then
               echo "Installing OpenAI Codex CLI..."
               npm install -g @openai/codex
+            else
+              echo "Updating OpenAI Codex CLI..."
+              npm update -g @openai/codex
             fi
             if [ ! -x "$NPM_CONFIG_PREFIX/bin/claude" ]; then
               echo "Installing Anthropic Claude CLI..."
               npm install -g @anthropic-ai/claude-code
+            else
+              echo "Updating Anthropic Claude CLI..."
+              npm update -g @anthropic-ai/claude-code
             fi
             if [ ! -x "$NPM_CONFIG_PREFIX/bin/gemini" ]; then
               echo "Installing Google Gemini CLI..."
               npm install --engine-strict -g @google/gemini-cli@latest
+            else
+              echo "Updating Google Gemini CLI..."
+              npm update -g @google/gemini-cli --engine-strict
             fi
             if [ ! -x "$NPM_CONFIG_PREFIX/bin/slate" ]; then
               echo "Installing Slate CLI..."
               npm install -g @randomlabs/slatecli
+            else
+              echo "Updating Slate CLI..."
+              npm update -g @randomlabs/slatecli
             fi
           '';
 
