@@ -10,6 +10,7 @@ import json
 import logging
 import random
 import websockets
+from websockets.protocol import State
 from typing import Set, Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -162,7 +163,7 @@ class Signaler:
             while not self._closed.is_set():
                 try:
                     msg = await asyncio.wait_for(self._sendq.get(), timeout=1.0)
-                    if self.ws and not self.ws.closed:
+                    if self.ws and self._ws_is_open():
                         await self.ws.send(json.dumps(msg, ensure_ascii=False))
                     self._sendq.task_done()
                 except asyncio.TimeoutError:
@@ -181,4 +182,20 @@ class Signaler:
         :return: True if connected, False otherwise.
         :rtype: bool
         """
-        return self.ws is not None and not self.ws.closed and not self._closed.is_set()
+        return self.ws is not None and self._ws_is_open() and not self._closed.is_set()
+
+    def _ws_is_open(self) -> bool:
+        """Return True when the underlying WebSocket connection is open."""
+        if not self.ws:
+            return False
+
+        closed = getattr(self.ws, "closed", None)
+        if closed is not None:
+            return not closed
+
+        state = getattr(self.ws, "state", None)
+        if state is not None:
+            return state == State.OPEN
+
+        return True
+

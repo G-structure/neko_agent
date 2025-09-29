@@ -23,7 +23,7 @@ agent:
     fi
     mkdir -p tmp
     export NEKO_LOGFILE="${NEKO_LOGFILE:-${PWD}/tmp/neko_agent.log}"
-    python src/agent.py --task "${NEKO_TASK:-search for pics of cats}"
+    python src/agent_refactored.py --task "${NEKO_TASK:-search for pics of cats}"
 
 # Launch the agent with a custom task
 agent-task task:
@@ -51,7 +51,7 @@ agent-online:
     fi
     mkdir -p tmp
     export NEKO_LOGFILE="${NEKO_LOGFILE:-${PWD}/tmp/neko_agent.log}"
-    python src/agent.py --online
+    python src/agent_refactored.py --online
 
 # Force kill the agent script
 kill-agent:

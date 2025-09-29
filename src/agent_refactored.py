@@ -341,11 +341,14 @@ class NekoAgent:
             await self.client.connect()
             self.logger.info("Connected to Neko server")
 
-            # Wait for first frame
+            # Wait for media to arrive before starting navigation
             self.logger.info("Waiting for first frame...")
-            frame = await self.client.frame_source.wait_for_frame(timeout=30.0)
-            if not frame:
-                raise RuntimeError("No frame received within 30 seconds")
+            if not await self.client.wait_for_track(timeout=30.0):
+                raise RuntimeError("No video track established within 30 seconds")
+
+            first_frame = await self.client.wait_for_frame(timeout=20.0)
+            if not first_frame:
+                raise RuntimeError("No frame received within 20 seconds of video track")
 
             self.logger.info("First frame received, starting navigation")
 

@@ -148,31 +148,50 @@ class WebRTCFrameSource(FrameSource):
         except asyncio.TimeoutError:
             return None
 
+    def _convert_frame(self, frame: Any) -> Optional[Image.Image]:
+        """Convert a WebRTC frame into a PIL Image with fallbacks."""
+        try:
+            img = frame.to_image()
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                raise ValueError(f"invalid image dimensions: {w}x{h}")
+            return img.convert("RGB")
+        except Exception as primary_exc:
+            try:
+                arr = frame.to_ndarray(format="rgb24")
+                if getattr(arr, "size", 0) == 0:
+                    raise ValueError("empty ndarray from frame")
+                img = Image.fromarray(arr, "RGB")
+                w, h = img.size
+                if w <= 0 or h <= 0:
+                    raise ValueError(f"invalid ndarray image dimensions: {w}x{h}")
+                return img
+            except Exception as fallback_exc:
+                logger.warning(
+                    "Frame conversion failed: %s; fallback error: %s",
+                    primary_exc,
+                    fallback_exc
+                )
+        return None
+
     async def _reader(self, track: VideoStreamTrack) -> None:
-        """Background task that reads frames from the VideoStreamTrack.
-
-        This method continuously receives frames from the provided track,
-        processes them into PIL Images, and stores the latest frame for
-        retrieval. It includes frame filtering and error handling.
-
-        :param track: The WebRTC video track to read from.
-        :type track: VideoStreamTrack
-        :return: None
-        :rtype: None
-        """
+        """Background task that reads frames from the VideoStreamTrack."""
         try:
             while self._running:
                 try:
                     frame = await track.recv()
 
-                    # Convert frame to PIL Image
-                    img = frame.to_image()
+                    img = self._convert_frame(frame)
+                    if img is None:
+                        await asyncio.sleep(0.05)
+                        continue
 
-                    # Resize if needed
                     if self.max_size and (img.width > self.max_size[0] or img.height > self.max_size[1]):
+                        img = img.copy()
                         img.thumbnail(self.max_size, Image.Resampling.LANCZOS)
+                    else:
+                        img = img.copy()
 
-                    # Store the frame
                     async with self.lock:
                         self.image = img
                         if not self.first_frame.is_set():
@@ -192,7 +211,6 @@ class WebRTCFrameSource(FrameSource):
             logger.error("WebRTC frame reader error: %s", e)
         finally:
             self._running = False
-
 
 class LiteFrameSource(FrameSource):
     """Frame source for video_lite mode using base64-encoded images over WebSocket.

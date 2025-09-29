@@ -61,7 +61,14 @@ class WebRTCNekoClient(NekoClient):
         self.action_executor: Optional[ActionExecutor] = None
 
         # Configuration
-        self.ice_servers = ice_servers or []
+        self._initial_ice_servers = [
+            entry for entry in (
+                self._normalize_ice_entry(item)
+                for item in (ice_servers or [])
+            )
+            if entry is not None
+        ]
+        self._configured_ice_servers = list(self._initial_ice_servers)
         self.ice_policy = kwargs.get("ice_policy", "strict")
         self.enable_audio = kwargs.get("enable_audio", True)
         self.rtcp_keepalive = kwargs.get("rtcp_keepalive", False)
@@ -132,12 +139,22 @@ class WebRTCNekoClient(NekoClient):
             raise ConnectionError(f"Connection failed: {e}")
 
     async def disconnect(self) -> None:
-        """Close all connections and clean up resources.
-
-        :return: None
-        :rtype: None
-        """
+        """Close all connections and clean up resources."""
         self._connection_state = ConnectionState.DISCONNECTED
+
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
+        if self.frame_source and hasattr(self.frame_source, "stop"):
+            try:
+                await self.frame_source.stop()
+            except Exception as e:
+                logger.debug("Error stopping frame source: %s", e)
+        self.frame_source = NoFrameSource()
 
         if self.pc:
             await self.pc.close()
@@ -147,8 +164,14 @@ class WebRTCNekoClient(NekoClient):
             await self.signaler.close()
             self.signaler = None
 
+        self._configured_ice_servers = list(self._initial_ice_servers)
+        self._ice_candidates_buffer.clear()
+        self._remote_description_set = False
         self._video_track = None
+        self._audio_track = None
         self.action_executor = None
+        self.is_lite = False
+
         logger.info("WebRTC Neko client disconnected")
 
     def is_connected(self) -> bool:
@@ -157,9 +180,20 @@ class WebRTCNekoClient(NekoClient):
         :return: True if connected, False otherwise.
         :rtype: bool
         """
-        return (self._connection_state == ConnectionState.CONNECTED and
-                self.signaler and self.signaler.is_connected() and
-                self.pc and self.pc.connectionState == "connected")
+        if self._connection_state == ConnectionState.FAILED:
+            return False
+
+        if not self.signaler or not self.signaler.is_connected():
+            return False
+
+        if not self.pc:
+            return True
+
+        state = getattr(self.pc, "connectionState", None)
+        if state in ("closed", "failed"):
+            return False
+
+        return True
 
     async def send_action(self, action: Action) -> None:
         """Send an action to be executed on the remote session.
@@ -228,7 +262,7 @@ class WebRTCNekoClient(NekoClient):
     async def _setup_peer_connection(self) -> None:
         """Initialize the WebRTC peer connection with ICE servers."""
         ice_servers: List[RTCIceServer] = []
-        for entry in self.ice_servers:
+        for entry in self._configured_ice_servers:
             if isinstance(entry, dict):
                 ice_servers.append(RTCIceServer(**entry))
             else:
@@ -241,8 +275,71 @@ class WebRTCNekoClient(NekoClient):
         self.pc = RTCPeerConnection(config)
         self.pc.on("icecandidate", self._on_ice_candidate)
         self.pc.on("track", self._on_track)
+        self.pc.on("iceconnectionstatechange", lambda: logger.info("iceConnectionState -> %s", self.pc.iceConnectionState))
+        self.pc.on("connectionstatechange", lambda: logger.info("connectionState -> %s", self.pc.connectionState))
 
         logger.info("WebRTC peer connection initialized")
+
+    def _normalize_ice_entry(self, entry: Any) -> Optional[Dict[str, Any]]:
+        """Normalize various ICE server representations to a dict."""
+        if entry is None:
+            return None
+
+        if isinstance(entry, (list, tuple)):
+            values = list(entry)
+            if not values:
+                return None
+            return {"urls": values}
+
+        if isinstance(entry, str):
+            return {"urls": entry}
+
+        if isinstance(entry, dict):
+            urls = entry.get("urls") or entry.get("url")
+            if not urls:
+                return None
+
+            normalized: Dict[str, Any] = {"urls": urls}
+            username = entry.get("username")
+            credential = entry.get("credential") or entry.get("password")
+            if username:
+                normalized["username"] = username
+            if credential:
+                normalized["credential"] = credential
+            return normalized
+
+        return None
+
+    def _extract_remote_ice_servers(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Parse ICE server definitions from a signaling payload."""
+        candidates = (
+            payload.get("ice")
+            or payload.get("iceServers")
+            or payload.get("ice_servers")
+            or payload.get("iceservers")
+            or []
+        )
+
+        servers: List[Dict[str, Any]] = []
+        for entry in candidates:
+            normalized = self._normalize_ice_entry(entry)
+            if normalized:
+                servers.append(normalized)
+        return servers
+
+    async def _reset_peer_connection(self) -> None:
+        """Recreate the RTCPeerConnection using the current ICE config."""
+        if self.pc:
+            try:
+                await self.pc.close()
+            except Exception as e:
+                logger.debug("Error closing peer connection during reset: %s", e)
+        self.pc = None
+        self._remote_description_set = False
+        buffered_candidates = list(self._ice_candidates_buffer)
+        self._ice_candidates_buffer.clear()
+        await self._setup_peer_connection()
+        self._ice_candidates_buffer.extend(buffered_candidates)
 
     async def _handle_signaling_messages(self) -> None:
         """Background task to handle WebSocket signaling messages."""
@@ -277,18 +374,44 @@ class WebRTCNekoClient(NekoClient):
         event = msg.get("event", "")
         payload = msg.get("payload", {})
 
-        if event == "signal/offer":
+        if not payload and event == "signal/provide":
+            payload = {k: v for k, v in msg.items() if k != "event"}
+
+        if event in {"signal/offer", "signal/provide"}:
+            lite = bool(payload.get("lite"))
+            if lite and not isinstance(self.frame_source, LiteFrameSource):
+                self.is_lite = True
+                await self.setup_video_lite()
+                return
+
+            need_reset = False
+            if not self.pc or getattr(self.pc, "connectionState", None) in {"closed", "failed"}:
+                need_reset = True
+
+            if not self._remote_description_set:
+                remote_ice = self._extract_remote_ice_servers(payload)
+                if remote_ice:
+                    combined = list(remote_ice)
+                    if self.ice_policy != "strict":
+                        for entry in self._initial_ice_servers:
+                            if entry not in combined:
+                                combined.append(entry)
+                    if combined != self._configured_ice_servers:
+                        self._configured_ice_servers = combined
+                        need_reset = True
+
+            if need_reset:
+                await self._reset_peer_connection()
+
             sdp = payload.get("sdp")
             if sdp and self.pc:
                 await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
                 self._remote_description_set = True
 
-                # Process any buffered ICE candidates
                 for candidate in self._ice_candidates_buffer:
                     await self.pc.addIceCandidate(candidate)
                 self._ice_candidates_buffer.clear()
 
-                # Create and send answer
                 answer = await self.pc.createAnswer()
                 await self.pc.setLocalDescription(answer)
 
@@ -302,6 +425,10 @@ class WebRTCNekoClient(NekoClient):
             if sdp and self.pc:
                 await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
                 self._remote_description_set = True
+
+        elif event == "signal/close":
+            logger.info("Received signal/close; tearing down connection")
+            await self.disconnect()
 
     async def _handle_ice_message(self, msg: Dict[str, Any]) -> None:
         """Handle ICE candidate messages."""
@@ -349,13 +476,17 @@ class WebRTCNekoClient(NekoClient):
 
     async def setup_video_lite(self) -> None:
         """Set up video_lite mode for base64-encoded frames over WebSocket."""
-        if self.is_lite:
-            self.frame_source = LiteFrameSource()
-            await self.frame_source.start()
-            # Start video_lite handler
-            task = asyncio.create_task(self._handle_video_lite())
-            self._tasks.add(task)
-            logger.info("Set up video_lite frame source")
+        if not self.is_lite:
+            return
+
+        if isinstance(self.frame_source, LiteFrameSource):
+            return
+
+        self.frame_source = LiteFrameSource()
+        await self.frame_source.start()
+        task = asyncio.create_task(self._handle_video_lite())
+        self._tasks.add(task)
+        logger.info("Set up video_lite frame source")
 
     async def _handle_video_lite(self) -> None:
         """Handle video_lite messages with base64-encoded frames."""
@@ -413,8 +544,16 @@ class WebRTCNekoClient(NekoClient):
 
     async def _request_media(self) -> None:
         """Request media (video/audio) from the server."""
-        if self.signaler:
-            await self.signaler.send({"event": "signal/request"})
+        if not self.signaler:
+            return
+
+        payload = {"video": {}}
+        if self.enable_audio:
+            payload["audio"] = {}
+        else:
+            payload["audio"] = {"disabled": True}
+
+        await self.signaler.send({"event": "signal/request", "payload": payload})
 
     async def _handle_system_events(self) -> None:
         """Handle system events like session updates and host control."""
