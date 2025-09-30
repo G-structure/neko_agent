@@ -16,8 +16,9 @@ from tenacity import (
     retry_if_exception_type,
 )
 
-from .base import VisionAgent
+from .base import ModelResponse, VisionAgent
 from .parsing import parse_tool_call, parse_text_response
+from .reasoning import extract_think_segments
 
 if TYPE_CHECKING:
     from ..agent_refactored import Settings
@@ -85,12 +86,11 @@ class OpenRouterAgent(VisionAgent):
         :param chat_callback: Optional callback for sending chat messages (e.g., thinking tokens)
         :raises ValueError: If API key is missing
         """
-        self.settings = settings
-        self.logger = logger
+        super().__init__(settings, logger, default_prompt_strategy="conversational_chain")
         self.chat_callback = chat_callback
 
         # Validate API key
-        if not settings.openrouter_api_key:
+        if not self.settings.openrouter_api_key:
             raise ValueError(
                 "OPENROUTER_API_KEY is required for OpenRouter agent. "
                 "Get your key at https://openrouter.ai/keys"
@@ -98,71 +98,51 @@ class OpenRouterAgent(VisionAgent):
 
         # HTTP client configuration
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.openrouter_timeout),
+            timeout=httpx.Timeout(self.settings.openrouter_timeout),
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
         )
 
         # Request headers
         self.headers = {
-            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
             "Content-Type": "application/json",
         }
-        if settings.openrouter_site_url:
-            self.headers["HTTP-Referer"] = settings.openrouter_site_url
-        if settings.openrouter_app_name:
-            self.headers["X-Title"] = settings.openrouter_app_name
+        if self.settings.openrouter_site_url:
+            self.headers["HTTP-Referer"] = self.settings.openrouter_site_url
+        if self.settings.openrouter_app_name:
+            self.headers["X-Title"] = self.settings.openrouter_app_name
 
         # Tool calling enabled by default
         self.use_tools = True
 
         self.logger.info(
             "OpenRouter agent initialized with model: %s",
-            settings.openrouter_model
+            self.settings.openrouter_model
         )
 
-    async def generate_action(
+    async def _invoke_model(
         self,
+        *,
+        system_prompt: str,
+        messages: List[Dict[str, Any]],
         image: Image.Image,
         task: str,
-        system_prompt: str,
-        action_history: List[Dict[str, Any]],
+        nav_mode: str,
         crop_box: Tuple[int, int, int, int],
         iteration: int,
         full_size: Tuple[int, int],
-    ) -> Optional[str]:
-        """Generate action using OpenRouter API.
-
-        :param image: Current screen image
-        :param task: Task description
-        :param system_prompt: System prompt defining action space
-        :param action_history: Previous actions for context
-        :param crop_box: Crop coordinates for refinement
-        :param iteration: Refinement iteration number
-        :param full_size: Original frame size
-        :return: Raw action string or None on failure
-        """
+        is_refinement: bool,
+    ) -> ModelResponse:
         try:
-            # Encode image to base64
-            base64_image = self._encode_image(image)
-
-            # Build messages
-            messages = self._build_messages(
-                task, system_prompt, base64_image, action_history,
-                crop_box, iteration, full_size
-            )
-
-            # Call API with retry logic
-            response = await self._call_api_with_retry(messages)
-
-            # Extract and send thinking tokens if available
-            await self._extract_and_send_thinking(response)
-
-            # Parse response
-            return self._parse_response(response, crop_box, full_size)
-
-        except Exception as e:
-            self.logger.error("OpenRouter API error: %s", e, exc_info=True)
-            return None
+            formatted_messages = self._format_messages_for_api(messages)
+            response = await self._call_api_with_retry(formatted_messages)
+            reasoning_emitted = await self._extract_and_send_thinking(response)
+            action_text = self._parse_response(response, crop_box, full_size)
+            reasoning = self._extract_reasoning_from_message(response)
+            return ModelResponse(text=action_text, reasoning=reasoning, raw=response, reasoning_emitted=reasoning_emitted)
+        except Exception as exc:
+            self.logger.error("OpenRouter API error: %s", exc, exc_info=True)
+            return ModelResponse(text=None)
 
     def _encode_image(self, image: Image.Image) -> str:
         """Encode PIL Image to base64 string.
@@ -177,73 +157,32 @@ class OpenRouterAgent(VisionAgent):
         image.save(buffer, format="JPEG", quality=95)
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-    def _build_messages(
-        self,
-        task: str,
-        system_prompt: str,
-        base64_image: str,
-        action_history: List[Dict[str, Any]],
-        crop_box: Tuple[int, int, int, int],
-        iteration: int,
-        full_size: Tuple[int, int],
+    def _format_messages_for_api(
+        self, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Build OpenRouter API messages.
-
-        :param task: Task description
-        :param system_prompt: System prompt
-        :param base64_image: Base64 encoded image
-        :param action_history: Previous actions
-        :param crop_box: Current crop box
-        :param iteration: Refinement iteration
-        :param full_size: Full frame size
-        :return: List of message dictionaries
-        """
-        # Build user prompt
-        if iteration == 0:
-            user_text = f"Task: {task}\n\nCurrent observation:"
-        else:
-            full_w, full_h = full_size
-            crop_w = max(crop_box[2] - crop_box[0], 1)
-            crop_h = max(crop_box[3] - crop_box[1], 1)
-            cx = ((crop_box[0] + crop_box[2]) / 2) / full_w if full_w else 0.5
-            cy = ((crop_box[1] + crop_box[3]) / 2) / full_h if full_h else 0.5
-            span_x = crop_w / full_w if full_w else 1.0
-            span_y = crop_h / full_h if full_h else 1.0
-            user_text = (
-                f"Task: {task}\n\n"
-                f"Refinement pass {iteration + 1} "
-                f"zoomed near normalized coords ({cx:.2f}, {cy:.2f}) "
-                f"with approx span ({span_x:.2f}, {span_y:.2f}).\n\n"
-                f"Current observation:"
-            )
-
-        # Add action history
-        if action_history:
-            history_lines = [
-                f"{idx}. {json.dumps(act, ensure_ascii=False)}"
-                for idx, act in enumerate(action_history[-5:], 1)
-            ]
-            user_text += "\n\nPrevious actions:\n" + "\n".join(history_lines)
-
-        # Build messages
-        messages = [
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-                    },
-                ],
-            },
-        ]
-
-        return messages
+        formatted: List[Dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content")
+            if isinstance(content, list):
+                formatted_content: List[Dict[str, Any]] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text":
+                        formatted_content.append({"type": "text", "text": item.get("text", "")})
+                    elif item.get("type") == "image" and item.get("image") is not None:
+                        base64_image = self._encode_image(item["image"])
+                        formatted_content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                            }
+                        )
+                formatted.append({"role": role, "content": formatted_content})
+            else:
+                formatted.append({"role": role, "content": content or ""})
+        return formatted
 
     @retry(
         stop=stop_after_attempt(3),
@@ -297,15 +236,11 @@ class OpenRouterAgent(VisionAgent):
 
         return response.json()
 
-    async def _extract_and_send_thinking(self, response: Dict[str, Any]) -> None:
-        """Extract thinking/reasoning tokens from response and send via chat callback.
-
-        Also logs reasoning metadata so we can verify the feature is active.
-
-        :param response: API response dictionary
-        """
-        reasoning_segments = []
+    async def _extract_and_send_thinking(self, response: Dict[str, Any]) -> bool:
+        """Extract thinking/reasoning tokens from response and forward via callback."""
+        reasoning_segments: List[str] = []
         have_details = False
+        emitted = False
 
         try:
             choice = response.get("choices", [{}])[0]
@@ -314,7 +249,7 @@ class OpenRouterAgent(VisionAgent):
             if not reasoning_details:
                 if self.settings.openrouter_reasoning_enabled:
                     self.logger.info("OpenRouter reasoning enabled but no reasoning_details returned.")
-                return
+                return False
 
             have_details = True
             callback = self.chat_callback
@@ -327,16 +262,50 @@ class OpenRouterAgent(VisionAgent):
                     continue
                 reasoning_segments.append(reasoning_text)
                 if callback:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(f"[thinking] {reasoning_text}")
-                    else:
-                        callback(f"[thinking] {reasoning_text}")
-                    self.logger.debug("Sent thinking token: %s chars", len(reasoning_text))
+                    try:
+                        if asyncio.iscoroutinefunction(callback):
+                            await callback(reasoning_text)
+                        else:
+                            callback(reasoning_text)
+                        emitted = True
+                    except Exception as exc:
+                        self.logger.debug("Reasoning callback failed: %s", exc, exc_info=True)
+                self.logger.debug("Received reasoning token: %s chars", len(reasoning_text))
 
         except Exception as e:
             self.logger.debug("Failed to extract thinking tokens: %s", e, exc_info=True)
         finally:
             self._log_reasoning_details(response, reasoning_segments, have_details)
+
+        return emitted
+
+
+    def _extract_reasoning_from_message(self, response: Dict[str, Any]) -> Optional[str]:
+        """Best-effort extraction of assistant reasoning text for history tracking."""
+        try:
+            choice = response.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            content = message.get("content")
+            if isinstance(content, list):
+                collected = [
+                    segment.get("text", "")
+                    for segment in content
+                    if isinstance(segment, dict) and segment.get("type") == "text"
+                ]
+                merged = chr(10).join(t for t in collected if t)
+                think = extract_think_segments(merged)
+                if think:
+                    return think
+                return merged.strip() or None
+            if isinstance(content, str):
+                think = extract_think_segments(content)
+                if think:
+                    return think
+                stripped = content.strip()
+                return stripped or None
+        except Exception:
+            return None
+        return None
 
 
 

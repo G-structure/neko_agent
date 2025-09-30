@@ -35,6 +35,9 @@ class Qwen3VLAgent(OpenRouterAgent):
                 "qwen/qwen2.5-vl-72b-instruct"
             )
 
+        if not getattr(settings, "prompt_strategy", None):
+            settings.prompt_strategy = "conversational_chain"
+
         # Initialize parent OpenRouter agent
         super().__init__(settings, logger)
 

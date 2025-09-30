@@ -31,14 +31,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from PIL import Image
 from metrics import (
-    frames_received, actions_executed, parse_errors, navigation_steps,
+    frames_received, actions_executed, navigation_steps,
     inference_latency, reconnects, resize_duration, start_metrics_server
 )
 
 from agents import VisionAgent
-from agents.parsing import safe_parse_action
+from agents.reasoning import strip_think_segments
 from neko_comms import WebRTCNekoClient
-from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC, Action as ActionModel
+from neko_comms.types import ACTION_SPACES, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
 
 
@@ -78,6 +78,7 @@ class Settings:
     audio_default: bool
     refinement_steps: int
     inference_timeout: float
+    prompt_strategy: Optional[str]
     neko_rtcp_keepalive: bool
     neko_skip_initial_frames: int
     force_exit_guard_ms: int
@@ -162,6 +163,7 @@ class Settings:
             offload_folder=os.environ.get("OFFLOAD_FOLDER", "./offload"),
             refinement_steps=int(os.environ.get("REFINEMENT_STEPS", "5")),
             inference_timeout=float(os.environ.get("NEKO_INFERENCE_TIMEOUT", "120")),
+            prompt_strategy=os.environ.get("NEKO_PROMPT_STRATEGY"),
             neko_rtcp_keepalive=_coerce_bool(os.environ.get("NEKO_RTCP_KEEPALIVE", "0")),
             neko_skip_initial_frames=int(os.environ.get("NEKO_SKIP_INITIAL_FRAMES", "5")),
             force_exit_guard_ms=int(os.environ.get("NEKO_FORCE_EXIT_GUARD_MS", "0")),
@@ -278,24 +280,6 @@ def setup_agent_logging(settings: Settings) -> logging.Logger:
 
 
 # ----------------------
-# Navigation prompt template
-# ----------------------
-#TODO: this prompt is specific to showui and we should be able to set other _NAV_SYSTEM prompts, in fact our code should become more flexiable
-#        to other prompt formats, right now it is constraned to this _NAV_SYSTEM prompt regardless of the model being used, this must be fixed.
-_NAV_SYSTEM = (
-    "You are an assistant trained to navigate the {_APP} screen. "
-    "Given a task instruction, a screen observation, and an action history sequence, "
-    "output the next action and wait for the next observation. "
-    "Here is the action space:\n{_ACTION_SPACE}\n"
-    "Format the action as a dictionary with the following keys:\n"
-    "{{'action': 'ACTION_TYPE', 'value': ..., 'position': ...}}\n"
-    "If value or position is not applicable, set as None. "
-    "Position might be [[x1,y1],[x2,y2]] for range actions. "
-    "Do NOT output extra keys or commentary."
-)
-
-
-# ----------------------
 # Utility functions (imported from utils and neko_comms modules)
 # ----------------------
 
@@ -346,8 +330,8 @@ class NekoAgent:
         # State
         self.running = True
         self.step_count = 0
-        self.action_history: List[Dict[str, Any]] = []   #TODO: the action history across this codebase should also include FRAMES that where used to generate the action.
         self.shutdown = asyncio.Event()
+        self.vision_agent.chat_callback = self._handle_reasoning_message
 
         # Online mode task coordination
         self._new_task_event = asyncio.Event()
@@ -517,6 +501,17 @@ class NekoAgent:
 #TODO: there are some parts to this which is custom for the agent_refactored.py file such as the specifc slash command "task" we are looking for, but I think this logic is
 #         likely duplicated in other files (and we need to minimize code duplication) such as yap_refactored.py. Think about where this should live, and how it should be flexable
 #         to support all useage of similar logic found elsewhere in this codebase.
+    async def _handle_reasoning_message(self, text: str) -> None:
+        """Forward model reasoning to chat with [thinking] prefix."""
+        if not text:
+            return
+        cleaned = strip_think_segments(text) or text
+        formatted = f"[thinking] {cleaned}"
+        try:
+            await self._send_chat(formatted)
+        except Exception as exc:
+            self.logger.debug("Failed to send reasoning to chat: %s", exc, exc_info=True)
+
     async def _process_chat_message(self, msg: Dict[str, Any]) -> None:
         """Process a chat message for task commands.
 
@@ -580,16 +575,7 @@ class NekoAgent:
         """
         self.logger.info("Executing task: %s", task)
         self.step_count = 0
-        self.action_history = []
-
-        # Build system prompt
-        action_space_desc = ACTION_SPACE_DESC.get(
-            self.nav_mode, ACTION_SPACE_DESC.get("web", "")
-        )
-        system_prompt = _NAV_SYSTEM.format(
-            _APP=self.nav_mode,
-            _ACTION_SPACE=action_space_desc
-        )
+        self.vision_agent.reset_history()
 
         await self._drain_initial_frames()
 
@@ -629,7 +615,7 @@ class NekoAgent:
                     save_atomic(frame, self.settings.frame_save_path, self.logger)
 
                 # Generate action via model inference
-                action = await self._generate_action(frame, task, system_prompt)
+                action = await self._generate_action(frame, task)
                 if not action:
                     self.logger.warning("Failed to generate valid action")
                     continue
@@ -637,8 +623,6 @@ class NekoAgent:
                 # Execute action using remote screen size for proper coordinate scaling
                 await self._execute_action(action)
 
-                # Add to history
-                self.action_history.append(action)
                 navigation_steps.inc()
 
                 # Check if task is complete
@@ -673,7 +657,7 @@ class NekoAgent:
             if not frame:
                 break
 
-    async def _generate_action(self, frame: Image.Image, task: str, system_prompt: str) -> Optional[Dict[str, Any]]:
+    async def _generate_action(self, frame: Image.Image, task: str) -> Optional[Dict[str, Any]]:
         """Generate action using the vision agent with iterative refinement for clicks.
 
         Note: Refinement works in frame coordinate space. The normalized coordinates [0-1]
@@ -699,23 +683,18 @@ class NekoAgent:
                     self.logger.warning("Failed to save refinement frame: %s", e)
 
             # Delegate to vision agent for inference
-            output_text = await self.vision_agent.generate_action(
+            frame_ref = f"step_{self.step_count:03d}_iter_{iteration}"
+            action = await self.vision_agent.generate_action(
                 image=current_frame,
                 task=task,
-                system_prompt=system_prompt,
-                action_history=self.action_history,
+                nav_mode=self.nav_mode,
                 crop_box=crop_box,
                 iteration=iteration,
                 full_size=full_size,
+                frame_ref=frame_ref,
             )
 
-            if not output_text:
-                break
-
-            self.logger.debug("Model output: %s", output_text)
-            action = safe_parse_action(output_text, self.nav_mode, self.logger, parse_errors)
             if not action:
-                self.logger.warning("Failed to generate valid action")
                 break
 
             final_action = action
@@ -725,8 +704,6 @@ class NekoAgent:
             if action_type == "DONE":
                 break
 
-            #TODO I would like to use another prompt for refinement so the vllm agent knows what is going on. We should matain a full chain so that the agent see the refiment frames and messages in the history (action history)
-            #        maybe this means extending action history to support sub actions such as refinement steps.
             # Refinement only applies to actions that produce a point position
             if self._action_has_point_position(action):
                 normalized = self._normalize_point_position(action, crop_box, full_size)
@@ -1066,8 +1043,6 @@ async def main() -> None:
     elif any((args.neko_url, args.username, args.password)):
         print("[WARN] --ws provided; ignoring REST args", file=sys.stderr)
 
-    #TODO the we need more customizablity on the prompt we are sending to the vllm, currently this file agent_refactored.py is mostly written for showui
-    #      we need to support other prompting stratgies.
     # Create agent with dependency injection
     agent = NekoAgent(
         vision_agent=vision_agent,

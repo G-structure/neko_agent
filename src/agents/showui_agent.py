@@ -1,7 +1,6 @@
 """ShowUI-2B vision agent implementation using Qwen2VL."""
 
 import asyncio
-import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -10,6 +9,7 @@ import torch
 from PIL import Image
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
+from .base import ModelResponse
 from .gpu_agent import GPUAgent
 
 if TYPE_CHECKING:
@@ -106,120 +106,62 @@ class ShowUIAgent(GPUAgent):
         output_text = await loop.run_in_executor(self.executor, _inference)
         return output_text
 
-    async def generate_action(
+    async def _invoke_model(
         self,
+        *,
+        system_prompt: str,
+        messages: List[Dict[str, Any]],
         image: Image.Image,
         task: str,
-        system_prompt: str,
-        action_history: List[Dict[str, Any]],
+        nav_mode: str,
         crop_box: Tuple[int, int, int, int],
         iteration: int,
         full_size: Tuple[int, int],
-    ) -> Optional[str]:
-        """Generate action using ShowUI-2B model inference.
+        is_refinement: bool,
+    ) -> ModelResponse:
+        """Marshal strategy messages into ShowUI processor inputs and run inference."""
 
-        :param image: Current screen image
-        :param task: Task description
-        :param system_prompt: System prompt defining action space
-        :param action_history: Previous actions for context
-        :param crop_box: Crop coordinates for refinement
-        :param iteration: Refinement iteration number
-        :param full_size: Original frame size
-        :return: Raw action string or None on failure
-        """
-        # Build prompt components
-        user_text, history_text = self._build_prompt_components(
-            task, action_history, crop_box, iteration, full_size
-        )
+        # Collect images referenced in the chat messages preserving order
+        image_refs: List[Image.Image] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image" and item.get("image") is not None:
+                    # Attach expected size metadata for Qwen processor
+                    item.setdefault(
+                        "size",
+                        {
+                            "shortest_edge": self.settings.size_shortest_edge,
+                            "longest_edge": self.settings.size_longest_edge,
+                        },
+                    )
+                    image_refs.append(item["image"])
 
-        # Construct multimodal message
-        segments: List[Dict[str, Any]] = [
-            {"type": "text", "text": system_prompt},
-            {"type": "text", "text": user_text},
-        ]
-        if history_text:
-            segments.append({"type": "text", "text": history_text})
-        segments.append({
-            "type": "image",
-            "image": image,
-            "size": {
-                "shortest_edge": self.settings.size_shortest_edge,
-                "longest_edge": self.settings.size_longest_edge,
-            },
-        })
-
-        messages = [{"role": "user", "content": segments}]
-
-        # Run inference with timeout
         try:
-            # Apply chat template and process inputs
-            text_input = self.processor.apply_chat_template(
+            chat_template = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True
             )
             inputs = self.processor(
-                text=[text_input],
-                images=[image],
+                text=[chat_template],
+                images=image_refs or [image],
                 padding=True,
                 return_tensors="pt",
             ).to(self.model.device)
 
-            # Run inference through base class method
             output_text = await asyncio.wait_for(
                 self._run_inference(inputs),
-                timeout=self.settings.inference_timeout
+                timeout=self.settings.inference_timeout,
             )
-            return output_text
+            return ModelResponse(text=output_text)
 
         except asyncio.TimeoutError:
             self.logger.error(
                 "Model inference timed out after %.1fs",
                 self.settings.inference_timeout,
             )
-            return None
-        except Exception as e:
-            self.logger.error("Inference failed: %s", e, exc_info=True)
-            return None
-
-    def _build_prompt_components(
-        self,
-        task: str,
-        action_history: List[Dict[str, Any]],
-        crop_box: Tuple[int, int, int, int],
-        iteration: int,
-        full_size: Tuple[int, int],
-    ) -> Tuple[str, Optional[str]]:
-        """Build textual prompt components for the model.
-
-        :param task: Task description
-        :param action_history: Previous actions
-        :param crop_box: Current crop box
-        :param iteration: Refinement iteration
-        :param full_size: Full frame size
-        :return: Tuple of (user_text, history_text)
-        """
-        if iteration == 0:
-            user_text = f"Task: {task}\n\nCurrent observation:"
-        else:
-            full_w, full_h = full_size
-            crop_w = max(crop_box[2] - crop_box[0], 1)
-            crop_h = max(crop_box[3] - crop_box[1], 1)
-            cx = ((crop_box[0] + crop_box[2]) / 2) / full_w if full_w else 0.5
-            cy = ((crop_box[1] + crop_box[3]) / 2) / full_h if full_h else 0.5
-            span_x = crop_w / full_w if full_w else 1.0
-            span_y = crop_h / full_h if full_h else 1.0
-            user_text = (
-                f"Task: {task}\n\n"
-                f"Refinement pass {iteration + 1} of {self.settings.refinement_steps} "
-                f"zoomed near normalized coords ({cx:.2f}, {cy:.2f}) "
-                f"with approx span ({span_x:.2f}, {span_y:.2f}).\n\nCurrent observation:"
-            )
-
-        history_text: Optional[str] = None
-        if action_history:
-            history_lines = [
-                f"{idx}. {json.dumps(act, ensure_ascii=False)}"
-                for idx, act in enumerate(action_history[-5:], 1)
-            ]
-            history_text = "Previous actions:\n" + "\n".join(history_lines)
-
-        return user_text, history_text
+            return ModelResponse(text=None)
+        except Exception as exc:
+            self.logger.error("Inference failed: %s", exc, exc_info=True)
+            return ModelResponse(text=None)

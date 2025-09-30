@@ -35,8 +35,7 @@ class GPUAgent(VisionAgent):
         :param settings: Configuration settings
         :param logger: Logger instance
         """
-        self.settings = settings
-        self.logger = logger
+        super().__init__(settings, logger, default_prompt_strategy="simple_cot")
 
         # Device and dtype will be set by _detect_device
         self.device: str = "cpu"
