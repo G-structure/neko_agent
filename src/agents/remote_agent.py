@@ -17,6 +17,7 @@ from tenacity import (
 )
 
 from .base import VisionAgent
+from .parsing import parse_tool_call, parse_text_response
 
 if TYPE_CHECKING:
     from ..agent_refactored import Settings
@@ -304,11 +305,11 @@ class OpenRouterAgent(VisionAgent):
 
             # Check for tool calls (Qwen computer use)
             if "tool_calls" in message and message["tool_calls"]:
-                return self._parse_tool_call(message["tool_calls"][0])
+                return parse_tool_call(message["tool_calls"][0], self.logger)
 
             # Fallback: parse text content
             if "content" in message and message["content"]:
-                return self._parse_text_response(message["content"])
+                return parse_text_response(message["content"], self.logger)
 
             self.logger.warning("No action found in API response")
             return None
@@ -316,87 +317,6 @@ class OpenRouterAgent(VisionAgent):
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             self.logger.error("Failed to parse API response: %s", e)
             return None
-
-    def _parse_tool_call(self, tool_call: Dict[str, Any]) -> str:
-        """Parse tool call response to action format.
-
-        Converts Qwen's tool call format to our action string format.
-
-        :param tool_call: Tool call dictionary from API
-        :return: Formatted action JSON string
-        """
-        try:
-            function = tool_call["function"]
-            args = json.loads(function["arguments"])
-
-            action_type = args["action"]
-            coord = args.get("coordinate", [500, 500])  # Default center
-            text = args.get("text")
-
-            # Convert Qwen action types to our format
-            action_map = {
-                "left_click": "CLICK",
-                "double_click": "CLICK",
-                "right_click": "CLICK",  # Could add RIGHT_CLICK type
-                "type": "INPUT",
-                "key": "ENTER",
-                "mouse_move": "HOVER",
-            }
-
-            mapped_action = action_map.get(action_type, "CLICK")
-
-            # Build action dict
-            action_dict = {
-                "action": mapped_action,
-                "value": text if text else None,
-                "position": self._convert_qwen_coordinate(coord),
-            }
-
-            # Return as JSON string (format expected by safe_parse_action)
-            return json.dumps(action_dict)
-
-        except (KeyError, json.JSONDecodeError) as e:
-            self.logger.error("Failed to parse tool call: %s", e)
-            return None
-
-    def _parse_text_response(self, content: str) -> Optional[str]:
-        """Parse text response as fallback.
-
-        Handles models that don't support tool calling by parsing
-        JSON from text content.
-
-        :param content: Text content from API
-        :return: Action JSON string or None
-        """
-        try:
-            # Try to extract JSON from text
-            # Look for {...} pattern
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                json_str = content[start:end]
-                # Validate it's valid JSON
-                json.loads(json_str)
-                return json_str
-
-            self.logger.warning("No valid JSON found in text response")
-            return None
-
-        except (ValueError, json.JSONDecodeError) as e:
-            self.logger.error("Failed to parse text response: %s", e)
-            return None
-
-    @staticmethod
-    def _convert_qwen_coordinate(coord: List[float]) -> List[float]:
-        """Convert Qwen's 1000-based coordinate to 0-1 normalized.
-
-        Qwen returns coordinates in [0, 1000] range.
-        We need [0, 1] range for our system.
-
-        :param coord: [x, y] in 0-1000 range
-        :return: [x, y] in 0-1 range
-        """
-        return [coord[0] / 1000.0, coord[1] / 1000.0]
 
     def get_device_info(self) -> Dict[str, Any]:
         """Return device and model information.

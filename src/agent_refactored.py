@@ -36,7 +36,8 @@ from metrics import (
 )
 
 from agents import VisionAgent
-from neko_comms import WebRTCNekoClient, safe_parse_action
+from agents.parsing import safe_parse_action
+from neko_comms import WebRTCNekoClient
 from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
 
