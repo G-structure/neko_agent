@@ -36,7 +36,7 @@ from metrics import (
 )
 
 from agents import VisionAgent
-from agents.parsing import safe_parse_action, COMPLETION_ACTIONS
+from agents.parsing import safe_parse_action
 from neko_comms import WebRTCNekoClient
 from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
@@ -237,8 +237,6 @@ class Settings:
                 errors.append("OPENROUTER_TOP_P must be between 0.0 and 1.0")
             if self.openrouter_timeout <= 0:
                 errors.append("OPENROUTER_TIMEOUT must be positive")
-            if self.openrouter_reasoning_effort and self.openrouter_reasoning_effort not in ("low", "medium", "high"):
-                errors.append("OPENROUTER_REASONING_EFFORT must be 'low', 'medium', or 'high'")
 
         return errors
 
@@ -282,6 +280,8 @@ def setup_agent_logging(settings: Settings) -> logging.Logger:
 # ----------------------
 # Navigation prompt template
 # ----------------------
+#TODO: this prompt is specific to showui and we should be able to set other _NAV_SYSTEM prompts, in fact our code should become more flexiable
+#        to other prompt formats, right now it is constraned to this _NAV_SYSTEM prompt regardless of the model being used, this must be fixed.
 _NAV_SYSTEM = (
     "You are an assistant trained to navigate the {_APP} screen. "
     "Given a task instruction, a screen observation, and an action history sequence, "
@@ -346,7 +346,7 @@ class NekoAgent:
         # State
         self.running = True
         self.step_count = 0
-        self.action_history: List[Dict[str, Any]] = []
+        self.action_history: List[Dict[str, Any]] = []   #TODO: the action history across this codebase should also include FRAMES that where used to generate the action.
         self.shutdown = asyncio.Event()
 
         # Online mode task coordination
@@ -371,7 +371,7 @@ class NekoAgent:
             ice_policy=self.settings.neko_ice_policy,
             enable_audio=self.audio_enabled,
             rtcp_keepalive=self.settings.neko_rtcp_keepalive,
-            auto_host=not online,
+            auto_host=True,
             request_media=True,
         )
 
@@ -482,7 +482,6 @@ class NekoAgent:
             ready_announced = False
             while not (self.nav_task and self.nav_task.strip()) and not self.shutdown.is_set():
                 if not ready_announced:
-                    await self._release_host_control("idle awaiting next task")
                     await self._send_chat("Ready. Send a task in chat to begin.")
                     ready_announced = True
                 try:
@@ -512,10 +511,12 @@ class NekoAgent:
                 self._pending_task = None
                 # Continue loop to start next task immediately
             else:
-                await self._release_host_control("task completed")
                 self.nav_task = ""
                 # Loop will wait for next task
 
+#TODO: there are some parts to this which is custom for the agent_refactored.py file such as the specifc slash command "task" we are looking for, but I think this logic is
+#         likely duplicated in other files (and we need to minimize code duplication) such as yap_refactored.py. Think about where this should live, and how it should be flexable
+#         to support all useage of similar logic found elsewhere in this codebase.
     async def _process_chat_message(self, msg: Dict[str, Any]) -> None:
         """Process a chat message for task commands.
 
@@ -548,6 +549,7 @@ class NekoAgent:
             status = f"Agent online, step {self.step_count}/{self.max_steps}"
             await self._send_chat(status)
 
+#TODO: similar to _process_chat_message this bit of logic is likely duplicated across other files so we should find a way to refactor to minimize codeduplication and make a better library.
     def _extract_text(self, msg: Dict[str, Any]) -> Optional[str]:
         """Extract text content from a chat message.
 
@@ -577,7 +579,6 @@ class NekoAgent:
         :param task: Task description to execute
         """
         self.logger.info("Executing task: %s", task)
-        await self._acquire_host_control("starting task")
         self.step_count = 0
         self.action_history = []
 
@@ -641,9 +642,8 @@ class NekoAgent:
                 navigation_steps.inc()
 
                 # Check if task is complete
-                action_type = action.get("action")
-                if action_type in COMPLETION_ACTIONS:
-                    self.logger.info("Task completed via %s action", action_type)
+                if action.get("action") == "DONE":
+                    self.logger.info("Task completed successfully")
                     await self._send_chat(f"Task completed: {task}")
                     break
 
@@ -721,9 +721,12 @@ class NekoAgent:
             final_action = action
             action_type = action.get("action")
 
+            #TODO this needs to parse or make sure we are parsing all DONE style actions
             if action_type == "DONE":
                 break
 
+            #TODO I would like to use another prompt for refinement so the vllm agent knows what is going on. We should matain a full chain so that the agent see the refiment frames and messages in the history (action history)
+            #        maybe this means extending action history to support sub actions such as refinement steps.
             # Refinement only applies to actions that produce a point position
             if self._action_has_point_position(action):
                 normalized = self._normalize_point_position(action, crop_box, full_size)
@@ -778,6 +781,7 @@ class NekoAgent:
         return True
 
     @staticmethod
+    #TODO: Check this logic later, making sure we are not normailizng the poitns more times than nessiary
     def _normalize_point_position(
         action: Dict[str, Any],
         crop_box: Tuple[int, int, int, int],
@@ -910,29 +914,7 @@ class NekoAgent:
         except Exception as e:
             self.logger.error("Failed to emit action annotation: %s", e)
 
-    async def _acquire_host_control(self, context: str) -> None:
-        """Request host control before executing a task."""
-        request_func = getattr(self.client, "request_host_control", None)
-        if not request_func or not callable(request_func):
-            return
-        try:
-            await request_func()
-            self.logger.info("Requested host control (%s)", context)
-        except Exception:
-            self.logger.debug("Failed to request host control (%s)", context, exc_info=True)
-
-
-    async def _release_host_control(self, context: str) -> None:
-        """Release host control when idle so manual users can take over."""
-        release_func = getattr(self.client, "release_host_control", None)
-        if not release_func or not callable(release_func):
-            return
-        try:
-            await release_func()
-            self.logger.info("Released host control (%s)", context)
-        except Exception:
-            self.logger.debug("Failed to release host control (%s)", context, exc_info=True)
-
+#TODO: this can proably be refactored out of the agent_refactored.py file as it is proably used in other files such as yap_refactorted.py or manual_refactored.py
     async def _send_chat(self, text: str) -> None:
         """Send a chat message through the client connection.
 
@@ -1084,6 +1066,8 @@ async def main() -> None:
     elif any((args.neko_url, args.username, args.password)):
         print("[WARN] --ws provided; ignoring REST args", file=sys.stderr)
 
+    #TODO the we need more customizablity on the prompt we are sending to the vllm, currently this file agent_refactored.py is mostly written for showui
+    #      we need to support other prompting stratgies.
     # Create agent with dependency injection
     agent = NekoAgent(
         vision_agent=vision_agent,
@@ -1101,12 +1085,6 @@ async def main() -> None:
     # Inject metrics server handles for clean shutdown
     agent._metrics_server = metrics_server
     agent._metrics_thread = metrics_thread
-
-    # Wire up chat callback for OpenRouter agents (for thinking tokens)
-    from agents.remote_agent import OpenRouterAgent
-    if isinstance(vision_agent, OpenRouterAgent):
-        vision_agent.chat_callback = agent._send_chat
-        logger.debug("Chat callback wired up for OpenRouter agent")
 
     try:
         await agent.run()
