@@ -370,6 +370,7 @@
             ps.zstandard
             ps.xxhash
             ps.tqdm
+            ps.tenacity
           ];
 
           # From-source Python env with PyTorch
@@ -411,6 +412,7 @@
                 zstandard
                 xxhash
                 tqdm
+                tenacity
               ]))
               pkgs.nodejs_20
               pkgs.nodePackages.npm
@@ -676,6 +678,7 @@ PY
             ps.zstandard
             ps.xxhash
             ps.tqdm
+            ps.tenacity
           ]; in commonPythonPackages ps));
 
           pyEnvOpt = pyEnvGeneric;

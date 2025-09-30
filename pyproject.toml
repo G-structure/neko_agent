@@ -20,6 +20,8 @@ dependencies = [
     "datasets>=2.14.0",
     "streaming>=0.7.0",
     "f5-tts>=0.0.1",
+    "httpx>=0.27.0",
+    "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]

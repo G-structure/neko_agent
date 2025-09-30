@@ -97,6 +97,18 @@ class Settings:
     # Other settings
     run_id: Optional[str]
 
+    # OpenRouter configuration
+    openrouter_api_key: Optional[str]
+    openrouter_model: str
+    openrouter_base_url: str
+    openrouter_site_url: Optional[str]
+    openrouter_app_name: Optional[str]
+    openrouter_max_tokens: int
+    openrouter_temperature: float
+    openrouter_top_p: float
+    openrouter_max_retries: int
+    openrouter_timeout: int
+
     @classmethod
     def from_env(cls) -> 'Settings':
         """Load settings from environment variables.
@@ -155,6 +167,20 @@ class Settings:
             log_format=os.environ.get("NEKO_LOG_FORMAT", "text").lower(),
             metrics_port=metrics_port,
             run_id=os.environ.get("NEKO_RUN_ID"),
+            # OpenRouter
+            openrouter_api_key=os.environ.get("OPENROUTER_API_KEY"),
+            openrouter_model=os.environ.get("OPENROUTER_MODEL", "qwen/qwen2.5-vl-72b-instruct"),
+            openrouter_base_url=os.environ.get(
+                "OPENROUTER_BASE_URL",
+                "https://openrouter.ai/api/v1/chat/completions"
+            ),
+            openrouter_site_url=os.environ.get("OPENROUTER_SITE_URL"),
+            openrouter_app_name=os.environ.get("OPENROUTER_APP_NAME", "Neko Agent"),
+            openrouter_max_tokens=int(os.environ.get("OPENROUTER_MAX_TOKENS", "512")),
+            openrouter_temperature=float(os.environ.get("OPENROUTER_TEMPERATURE", "0.0")),
+            openrouter_top_p=float(os.environ.get("OPENROUTER_TOP_P", "1.0")),
+            openrouter_max_retries=int(os.environ.get("OPENROUTER_MAX_RETRIES", "3")),
+            openrouter_timeout=int(os.environ.get("OPENROUTER_TIMEOUT", "60")),
         )
 
     def validate(self) -> List[str]:
@@ -185,6 +211,28 @@ class Settings:
             errors.append("NEKO_LOG_FORMAT must be 'text' or 'json'")
         if self.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
             errors.append("NEKO_LOGLEVEL must be valid logging level")
+
+        # OpenRouter validation
+        if self.agent_type in ("qwen3vl", "claude"):
+            if not self.openrouter_api_key:
+                errors.append(
+                    f"OPENROUTER_API_KEY required for agent_type={self.agent_type}. "
+                    f"Get your key at https://openrouter.ai/keys"
+                )
+            if "/" not in self.openrouter_model:
+                errors.append(
+                    "OPENROUTER_MODEL must be in format 'provider/model-name' "
+                    "(e.g., 'qwen/qwen2.5-vl-72b-instruct')"
+                )
+            if self.openrouter_max_tokens <= 0:
+                errors.append("OPENROUTER_MAX_TOKENS must be positive")
+            if not (0.0 <= self.openrouter_temperature <= 2.0):
+                errors.append("OPENROUTER_TEMPERATURE must be between 0.0 and 2.0")
+            if not (0.0 <= self.openrouter_top_p <= 1.0):
+                errors.append("OPENROUTER_TOP_P must be between 0.0 and 1.0")
+            if self.openrouter_timeout <= 0:
+                errors.append("OPENROUTER_TIMEOUT must be positive")
+
         return errors
 
 

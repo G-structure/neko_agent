@@ -1,10 +1,11 @@
 """Vision agent abstractions for Neko automation.
 
 This module provides pluggable vision model interfaces for GUI automation.
-Supports local models (ShowUI/Qwen2VL) and remote APIs (Claude, Qwen3VL).
+Supports local models (ShowUI/Qwen2VL) and remote APIs (OpenRouter, Qwen3VL).
 """
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 from .base import VisionAgent
@@ -27,11 +28,23 @@ def create_vision_agent(agent_type: str, settings: 'Settings', logger: logging.L
     if agent_type == "showui":
         from .showui_agent import ShowUIAgent
         return ShowUIAgent(settings, logger)
-    elif agent_type == "claude":
-        from .remote_agent import ClaudeComputerUseAgent
-        return ClaudeComputerUseAgent(settings, logger)
+
     elif agent_type == "qwen3vl":
-        from .remote_agent import Qwen3VLAgent
+        from .qwen3vl_agent import Qwen3VLAgent
         return Qwen3VLAgent(settings, logger)
+
+    elif agent_type == "claude":
+        # Future: Claude Computer Use via OpenRouter
+        from .remote_agent import OpenRouterAgent
+        # Override model to Claude
+        settings.openrouter_model = os.environ.get(
+            "CLAUDE_MODEL",
+            "anthropic/claude-3.5-sonnet"
+        )
+        return OpenRouterAgent(settings, logger)
+
     else:
-        raise ValueError(f"Unknown agent type: {agent_type}. Supported: showui, claude, qwen3vl")
+        raise ValueError(
+            f"Unknown agent type: {agent_type}. "
+            f"Supported: showui, qwen3vl, claude"
+        )
