@@ -17,7 +17,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 
-COMPLETION_ACTIONS = {"DONE"}
+COMPLETION_ACTIONS = {"DONE", "ANSWER"}
 
 
 def safe_parse_action(

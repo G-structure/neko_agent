@@ -36,7 +36,7 @@ from metrics import (
 )
 
 from agents import VisionAgent
-from agents.parsing import safe_parse_action
+from agents.parsing import safe_parse_action, COMPLETION_ACTIONS
 from neko_comms import WebRTCNekoClient
 from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
@@ -371,7 +371,7 @@ class NekoAgent:
             ice_policy=self.settings.neko_ice_policy,
             enable_audio=self.audio_enabled,
             rtcp_keepalive=self.settings.neko_rtcp_keepalive,
-            auto_host=True,
+            auto_host=not online,
             request_media=True,
         )
 
@@ -482,6 +482,7 @@ class NekoAgent:
             ready_announced = False
             while not (self.nav_task and self.nav_task.strip()) and not self.shutdown.is_set():
                 if not ready_announced:
+                    await self._release_host_control("idle awaiting next task")
                     await self._send_chat("Ready. Send a task in chat to begin.")
                     ready_announced = True
                 try:
@@ -511,6 +512,7 @@ class NekoAgent:
                 self._pending_task = None
                 # Continue loop to start next task immediately
             else:
+                await self._release_host_control("task completed")
                 self.nav_task = ""
                 # Loop will wait for next task
 
@@ -575,6 +577,7 @@ class NekoAgent:
         :param task: Task description to execute
         """
         self.logger.info("Executing task: %s", task)
+        await self._acquire_host_control("starting task")
         self.step_count = 0
         self.action_history = []
 
@@ -638,8 +641,9 @@ class NekoAgent:
                 navigation_steps.inc()
 
                 # Check if task is complete
-                if action.get("action") == "DONE":
-                    self.logger.info("Task completed successfully")
+                action_type = action.get("action")
+                if action_type in COMPLETION_ACTIONS:
+                    self.logger.info("Task completed via %s action", action_type)
                     await self._send_chat(f"Task completed: {task}")
                     break
 
@@ -905,6 +909,29 @@ class NekoAgent:
 
         except Exception as e:
             self.logger.error("Failed to emit action annotation: %s", e)
+
+    async def _acquire_host_control(self, context: str) -> None:
+        """Request host control before executing a task."""
+        request_func = getattr(self.client, "request_host_control", None)
+        if not request_func or not callable(request_func):
+            return
+        try:
+            await request_func()
+            self.logger.info("Requested host control (%s)", context)
+        except Exception:
+            self.logger.debug("Failed to request host control (%s)", context, exc_info=True)
+
+
+    async def _release_host_control(self, context: str) -> None:
+        """Release host control when idle so manual users can take over."""
+        release_func = getattr(self.client, "release_host_control", None)
+        if not release_func or not callable(release_func):
+            return
+        try:
+            await release_func()
+            self.logger.info("Released host control (%s)", context)
+        except Exception:
+            self.logger.debug("Failed to release host control (%s)", context, exc_info=True)
 
     async def _send_chat(self, text: str) -> None:
         """Send a chat message through the client connection.

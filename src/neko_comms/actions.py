@@ -101,9 +101,10 @@ class ActionExecutor:
                     amount = int(amount)
                 except Exception:
                     amount = 1
+                # Positive delta_y scrolls up in Neko; invert so "down" means visually downward.
                 delta_map = {
-                    "down": (0, 120 * amount),
-                    "up": (0, -120 * amount),
+                    "down": (0, -120 * amount),
+                    "up": (0, 120 * amount),
                     "right": (120 * amount, 0),
                     "left": (-120 * amount, 0),
                 }

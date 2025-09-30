@@ -2328,9 +2328,10 @@ class NekoAgent:
                     amount = int(amount)
                 except Exception:
                     amount = 1
+                # Positive delta_y scrolls upward in Neko; flip so prompts align with human intuition.
                 delta_map = {
-                    "down": (0, 120 * amount),
-                    "up":   (0, -120 * amount),
+                    "down": (0, -120 * amount),
+                    "up":   (0, 120 * amount),
                     "right":(120 * amount, 0),
                     "left": (-120 * amount, 0),
                 }
