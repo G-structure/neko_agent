@@ -583,6 +583,14 @@ class NekoAgent:
 
         await self._drain_initial_frames()
 
+        # Validate screen size is initialized before starting navigation
+        screen_size = self.client.frame_size
+        if screen_size == (0, 0):
+            self.logger.warning(
+                "Screen size not yet received from server. "
+                "Coordinate scaling may be incorrect until system/init or screen/updated event is received."
+            )
+
         for step in range(self.max_steps):
             if not self.running:
                 break
@@ -599,8 +607,9 @@ class NekoAgent:
 
                 frames_received.inc()
 
-                # Track original frame size before resizing
-                original_frame_size = frame.size
+                # Log frame size vs screen size for debugging
+                screen_size = self.client.frame_size
+                self.logger.debug("Frame size: %s, Screen size: %s", frame.size, screen_size)
 
                 # Resize frame if needed
                 frame = resize_and_validate_image(frame, self.settings.size_longest_edge, self.logger)
@@ -615,8 +624,8 @@ class NekoAgent:
                     self.logger.warning("Failed to generate valid action")
                     continue
 
-                # Execute action with original frame size for proper coordinate scaling
-                await self._execute_action(action, original_frame_size)
+                # Execute action using remote screen size for proper coordinate scaling
+                await self._execute_action(action)
 
                 # Add to history
                 self.action_history.append(action)
@@ -655,8 +664,14 @@ class NekoAgent:
                 break
 
     async def _generate_action(self, frame: Image.Image, task: str, system_prompt: str) -> Optional[Dict[str, Any]]:
-        """Generate action using the vision agent with iterative refinement for clicks."""
+        """Generate action using the vision agent with iterative refinement for clicks.
 
+        Note: Refinement works in frame coordinate space. The normalized coordinates [0-1]
+        returned by this method are resolution-independent and will be scaled to screen
+        coordinates during action execution.
+        """
+
+        # Use frame size for cropping - we work in frame coordinate space here
         full_size = frame.size
         crop_box = (0, 0, full_size[0], full_size[1])
         final_action: Optional[Dict[str, Any]] = None
@@ -821,11 +836,14 @@ class NekoAgent:
 
         return (left, top, int(right), int(bottom))
 
-    async def _execute_action(self, action: Dict[str, Any], frame_size: Tuple[int, int]) -> None:
+    async def _execute_action(self, action: Dict[str, Any]) -> None:
         """Execute an action using the action executor.
 
+        Uses the remote browser's screen size (self.client.frame_size) for coordinate
+        scaling, not the video frame dimensions. This ensures clicks are positioned
+        correctly even when the video stream resolution differs from the browser resolution.
+
         :param action: Action dictionary to execute
-        :param frame_size: Original frame size (width, height) for coordinate scaling
         """
         action_type = action.get("action")
         if not action_type:
@@ -836,6 +854,14 @@ class NekoAgent:
             if executor is None:
                 raise RuntimeError('Action executor not ready')
 
+            # Get remote screen size from client
+            screen_size = self.client.frame_size
+
+            # Validate screen size before executing actions
+            if screen_size == (0, 0):
+                self.logger.error("Screen size not yet initialized, cannot execute action")
+                return
+
             action_payload = ActionModel(
                 action=action.get("action"),
                 value=action.get("value"),
@@ -843,10 +869,10 @@ class NekoAgent:
                 amount=action.get("amount"),
             )
 
-            await executor.execute_action(action_payload, frame_size)
+            await executor.execute_action(action_payload, screen_size)
 
             actions_executed.labels(action_type=action_type).inc()
-            self.logger.info("Executed action: %s", action)
+            self.logger.info("Executed action: %s (screen_size=%s)", action, screen_size)
 
             # Emit action annotation for training data capture
             await self._emit_action_annotation(action)

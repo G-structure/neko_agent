@@ -5,3 +5,5 @@ Notes
 
 - [ ] Go through an dedup code...
   - [ ] remote_agent.py and showui_agent.py (maybe gpu_agent.py)
+
+for agent_refactored.py we for some reason always think the screen is 1920x1080
