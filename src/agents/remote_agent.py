@@ -281,6 +281,7 @@ class OpenRouterAgent(VisionAgent):
             if self.settings.openrouter_reasoning_effort:
                 reasoning_config["effort"] = self.settings.openrouter_reasoning_effort
             payload["reasoning"] = reasoning_config
+            self.logger.info("OpenRouter reasoning enabled with config: %s", reasoning_config)
 
         self.logger.debug(
             "Calling OpenRouter API with model: %s",
@@ -299,35 +300,105 @@ class OpenRouterAgent(VisionAgent):
     async def _extract_and_send_thinking(self, response: Dict[str, Any]) -> None:
         """Extract thinking/reasoning tokens from response and send via chat callback.
 
+        Also logs reasoning metadata so we can verify the feature is active.
+
         :param response: API response dictionary
         """
-        if not self.chat_callback:
-            return
+        reasoning_segments = []
+        have_details = False
 
         try:
-            # Check for reasoning_details in response
             choice = response.get("choices", [{}])[0]
             reasoning_details = choice.get("reasoning_details")
 
             if not reasoning_details:
+                if self.settings.openrouter_reasoning_enabled:
+                    self.logger.info("OpenRouter reasoning enabled but no reasoning_details returned.")
                 return
 
-            # Extract text from reasoning details
-            # According to OpenRouter docs, reasoning_details is an array
+            have_details = True
+            callback = self.chat_callback
+
             for detail in reasoning_details:
-                if isinstance(detail, dict):
-                    # Extract text content
-                    reasoning_text = detail.get("text") or detail.get("content")
-                    if reasoning_text:
-                        # Send thinking token via callback
-                        if asyncio.iscoroutinefunction(self.chat_callback):
-                            await self.chat_callback(f"[thinking] {reasoning_text}")
-                        else:
-                            self.chat_callback(f"[thinking] {reasoning_text}")
-                        self.logger.debug("Sent thinking token: %s chars", len(reasoning_text))
+                if not isinstance(detail, dict):
+                    continue
+                reasoning_text = detail.get("text") or detail.get("content")
+                if not reasoning_text:
+                    continue
+                reasoning_segments.append(reasoning_text)
+                if callback:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(f"[thinking] {reasoning_text}")
+                    else:
+                        callback(f"[thinking] {reasoning_text}")
+                    self.logger.debug("Sent thinking token: %s chars", len(reasoning_text))
 
         except Exception as e:
-            self.logger.debug("Failed to extract thinking tokens: %s", e)
+            self.logger.debug("Failed to extract thinking tokens: %s", e, exc_info=True)
+        finally:
+            self._log_reasoning_details(response, reasoning_segments, have_details)
+
+
+
+    def _log_reasoning_details(
+        self,
+        response: Dict[str, Any],
+        segments: List[str],
+        have_details: bool,
+    ) -> None:
+        """Log reasoning metadata returned by OpenRouter."""
+        if not self.settings.openrouter_reasoning_enabled:
+            return
+
+        try:
+            if segments:
+                preview_parts: List[str] = []
+                for text in segments[:3]:
+                    cleaned = " ".join(text.split())
+                    if len(cleaned) > 200:
+                        cleaned = f"{cleaned[:197]}..."
+                    preview_parts.append(cleaned)
+                preview = " | ".join(preview_parts)
+                total_chars = sum(len(s) for s in segments)
+                self.logger.info(
+                    "OpenRouter reasoning returned %d segment(s) (%d chars total). Preview: %s",
+                    len(segments),
+                    total_chars,
+                    preview,
+                )
+            elif have_details:
+                self.logger.info(
+                    "OpenRouter reasoning_details provided but no text content was found."
+                )
+            else:
+                self.logger.info(
+                    "OpenRouter reasoning enabled but response omitted reasoning_details."
+                )
+
+            if isinstance(response, dict):
+                usage = response.get("usage")
+                if isinstance(usage, dict):
+                    if "reasoning_tokens" in usage:
+                        self.logger.info(
+                            "OpenRouter reasoning tokens reported: %s",
+                            usage.get("reasoning_tokens"),
+                        )
+                    elif "reasoning" in usage:
+                        self.logger.info(
+                            "OpenRouter reasoning usage payload: %s",
+                            usage.get("reasoning"),
+                        )
+                    else:
+                        self.logger.debug("OpenRouter usage payload: %s", usage)
+
+                choice = response.get("choices", [{}])[0]
+                if isinstance(choice, dict) and choice.get("reasoning"):
+                    self.logger.debug(
+                        "OpenRouter choice reasoning metadata: %s",
+                        choice.get("reasoning"),
+                    )
+        except Exception as exc:
+            self.logger.debug("Failed to log reasoning metadata: %s", exc, exc_info=True)
 
     def _parse_response(
         self,
