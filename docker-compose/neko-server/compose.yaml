@@ -1,32 +1,32 @@
 version: "3.8"
 
 services:
-  neko-chrome:
-    image: ghcr.io/m1k1o/neko/chromium:latest
-    container_name: neko-chrome
-    restart: unless-stopped
-    network_mode: host
-    shm_size: 2gb
-    cap_add:
-      - SYS_ADMIN
-    environment:
-      NEKO_DESKTOP_SCREEN: 1920x1080@30
-      NEKO_MEMBER_PROVIDER: multiuser
-      NEKO_MEMBER_MULTIUSER_USER_PASSWORD: ${NEKO_USER:-neko}
-      NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: ${NEKO_PASS:-admin}
-      NEKO_WEBRTC_EPR: 59000-59100
-      NEKO_WEBRTC_TCPMUX: 100.98.199.38:56000
-      NEKO_SERVER_BIND: 100.98.199.38:8080
-      NEKO_WEBRTC_ICELITE: "false"
-      NEKO_WEBRTC_ICESERVERS_FRONTEND: '[{"urls":["stun:stun.l.google.com:19302"]}]'
-      NEKO_WEBRTC_ICESERVERS_BACKEND: '[{"urls":["stun:stun.l.google.com:19302"]}]'
-      NEKO_WEBRTC_TCP_ONLY: "false"
-      NEKO_WEBRTC_NAT1TO1: 100.98.199.38
-      NEKO_SERVER_PROXY: "false"
-      NEKO_DEBUG: 1
-      NEKO_CAPTURE_AUDIO_PIPELINE: "pulsesrc device=audio_output.monitor ! audio/x-raw,channels=2 ! audioconvert ! audiomixer name=mix ! queue ! opusenc ! rtpopuspay ! application/x-rtp,payload=111,encoding-name=OPUS pulsesrc device=audio_input.monitor ! audio/x-raw,channels=2 ! audioconvert ! mix."
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://100.98.199.38:8080"]
-      interval: 10s
-      retries: 5
-      timeout: 5
+    neko-chrome-audio:
+        image: ghcr.io/m1k1o/neko/chromium:latest
+        container_name: neko-chrome-audio
+        restart: unless-stopped
+        network_mode: host
+        shm_size: 2gb
+        cap_add:
+            - SYS_ADMIN
+        environment:
+            NEKO_DESKTOP_SCREEN: 1920x1080@30
+            NEKO_MEMBER_PROVIDER: multiuser
+            NEKO_MEMBER_MULTIUSER_USER_PASSWORD: ${NEKO_USER:-neko}
+            NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: ${NEKO_PASS:-admin}
+            NEKO_WEBRTC_EPR: 59000-59100
+            NEKO_WEBRTC_TCPMUX: 100.98.199.38:56000
+            NEKO_SERVER_BIND: 100.98.199.38:8080
+            NEKO_WEBRTC_ICELITE: "false"
+            NEKO_WEBRTC_ICESERVERS_FRONTEND: '[{"urls":["stun:stun.l.google.com:19302"]}]'
+            NEKO_WEBRTC_ICESERVERS_BACKEND: '[{"urls":["stun:stun.l.google.com:19302"]}]'
+            NEKO_WEBRTC_TCP_ONLY: "false"
+            NEKO_WEBRTC_NAT1TO1: 100.98.199.38
+            NEKO_SERVER_PROXY: "false"
+            NEKO_DEBUG: 1
+            NEKO_CAPTURE_AUDIO_PIPELINE: "audiomixer name=mix ! audioconvert ! opusenc ! rtpopuspay ! application/x-rtp,payload=111,encoding-name=OPUS ! appsink name=appsink pulsesrc device=audio_output.monitor ! audio/x-raw,channels=2 ! audioconvert ! mix. pulsesrc device=audio_input.monitor ! audio/x-raw,channels=2 ! audioconvert ! mix."
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://100.98.199.38:8080"]
+            interval: 10s
+            retries: 5
+            timeout: 5s

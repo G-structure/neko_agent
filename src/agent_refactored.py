@@ -648,17 +648,21 @@ class NekoAgent:
             final_action = action
             action_type = action.get("action")
 
-            # No refinement for non-click actions
             if action_type == "DONE":
                 break
 
-            # Refinement only applies to CLICK actions with valid position
-            if action_type == "CLICK":
-                normalized = self._normalize_click_position(action, crop_box, full_size)
+            # Refinement only applies to actions that produce a point position
+            if self._action_has_point_position(action):
+                normalized = self._normalize_point_position(action, crop_box, full_size)
                 if normalized:
                     final_action["position"] = normalized
-                    self.logger.info("Refinement iteration %d/%d: normalized position = %s",
-                                   iteration + 1, self.settings.refinement_steps, normalized)
+                    self.logger.info(
+                        "Refinement iteration %d/%d for %s: normalized position = %s",
+                        iteration + 1,
+                        self.settings.refinement_steps,
+                        action_type,
+                        normalized,
+                    )
 
                     # Continue refining if we have more iterations
                     if iteration < self.settings.refinement_steps - 1:
@@ -669,7 +673,7 @@ class NekoAgent:
                             continue
                 break
 
-            # Non-CLICK actions don't need refinement
+            # Actions without point coordinates do not use refinement
             break
 
         # Save final action-marked frame if configured
@@ -806,12 +810,27 @@ class NekoAgent:
         return user_text, history_text
 
     @staticmethod
-    def _normalize_click_position(
+    def _action_has_point_position(action: Dict[str, Any]) -> bool:
+        """Return True if the action carries a single [x, y] style position."""
+
+        position = action.get("position")
+        if not isinstance(position, list) or len(position) != 2:
+            return False
+
+        try:
+            float(position[0])
+            float(position[1])
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @staticmethod
+    def _normalize_point_position(
         action: Dict[str, Any],
         crop_box: Tuple[int, int, int, int],
         full_size: Tuple[int, int],
     ) -> Optional[List[float]]:
-        """Convert crop-local click coordinates to full-frame normalized coordinates."""
+        """Convert crop-local coordinates to full-frame normalized coordinates."""
 
         position = action.get("position")
         if not (isinstance(position, list) and len(position) == 2):

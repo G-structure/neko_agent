@@ -128,6 +128,9 @@ class Settings:
     voices_dir: str = os.environ.get("YAP_VOICES_DIR", "./voices")
     default_speaker: str = os.environ.get("YAP_SPK_DEFAULT", "default")
 
+    # Debug/Testing
+    save_audio_dir: Optional[str] = field(default_factory=lambda: os.environ.get("YAP_SAVE_AUDIO_DIR", None))
+
     # Logging
     log_level: str = os.environ.get("YAP_LOGLEVEL", "INFO")
     log_format: str = os.environ.get("YAP_LOG_FORMAT", "text")
@@ -386,6 +389,7 @@ class F5Synth:
             self._log.error("F5-TTS not importable: %s\nInstall SWivid/F5-TTS.", e)
             raise
         self.f5 = F5TTS()
+        self._lock = threading.Lock()
 
     def infer(self, ref_audio: str, ref_text: Optional[str], text: str) -> Tuple[np.ndarray, int]:
         """Generate speech using F5-TTS.
@@ -395,9 +399,10 @@ class F5Synth:
         :param text: Text to synthesize
         :return: Tuple of (waveform, sample_rate) - mono float32 in [-1,1]
         """
-        wav, sr, _meta = self.f5.infer(
-            ref_audio, ref_text, text, remove_silence=True
-        )
+        with self._lock:
+            wav, sr, _meta = self.f5.infer(
+                ref_audio, ref_text, text, remove_silence=True
+            )
         w = np.array(wav, dtype=np.float32)
         if w.ndim == 1:
             w = w[:, None]
@@ -444,6 +449,7 @@ class TTSPipeline:
         parallel: int,
         logger: logging.Logger,
         max_chars: int,
+        save_audio_dir: Optional[str] = None,
     ) -> None:
         """Initialize TTS pipeline with voice manager and audio parameters.
 
@@ -456,6 +462,7 @@ class TTSPipeline:
         :param parallel: Number of parallel TTS workers
         :param logger: Logger instance
         :param max_chars: Maximum characters per chunk
+        :param save_audio_dir: Optional directory to save audio chunks for debugging
         """
         self.voices = voices
         self.tts = tts
@@ -468,6 +475,13 @@ class TTSPipeline:
         self._parallel = max(1, parallel)
         self._epoch = 0  # Cancel token
         self.max_chars = max_chars
+        self.save_audio_dir = save_audio_dir
+        self._chunk_counter = 0
+
+        # Create save directory if specified
+        if self.save_audio_dir:
+            os.makedirs(self.save_audio_dir, exist_ok=True)
+            self._logger.info("Audio chunks will be saved to: %s", self.save_audio_dir)
 
         # Splicer tail carry (last overlap samples)
         self._carry = np.zeros((0, ch_out), dtype=np.float32)
@@ -557,6 +571,9 @@ class TTSPipeline:
                     out = self._splice_with_carry(wave_f32)
                     pcm_data = float_to_int16(out)
                     self.q.push(pcm_data)
+                    # Save audio chunk if debug directory is configured
+                    if self.save_audio_dir and len(pcm_data) > 0:
+                        self._save_audio_chunk(pcm_data, next_idx)
                 next_idx += 1
 
         # Drain remaining results
@@ -573,6 +590,9 @@ class TTSPipeline:
                 out = self._splice_with_carry(wave_f32)
                 pcm_data = float_to_int16(out)
                 self.q.push(pcm_data)
+                # Save audio chunk if debug directory is configured
+                if self.save_audio_dir and len(pcm_data) > 0:
+                    self._save_audio_chunk(pcm_data, next_idx)
             next_idx += 1
 
         if flush_end:
@@ -581,6 +601,28 @@ class TTSPipeline:
                     pcm_data = float_to_int16(self._carry)
                     self.q.push(pcm_data)
                     self._carry = np.zeros((0, self.ch_out), dtype=np.float32)
+
+    def _save_audio_chunk(self, pcm_data: np.ndarray, chunk_idx: int) -> None:
+        """Save audio chunk to disk for debugging.
+
+        :param pcm_data: PCM audio data as int16 array
+        :param chunk_idx: Chunk index for filename
+        """
+        try:
+            import wave
+            timestamp = time.time()
+            filename = os.path.join(
+                self.save_audio_dir,
+                f"chunk_{timestamp:.0f}_{chunk_idx:04d}.wav"
+            )
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(self.ch_out)
+                wf.setsampwidth(2)  # 2 bytes for int16
+                wf.setframerate(self.sr_out)
+                wf.writeframes(pcm_data.tobytes())
+            self._logger.debug("Saved audio chunk to: %s", filename)
+        except Exception as e:
+            self._logger.warning("Failed to save audio chunk: %s", e)
 
     def _splice_with_carry(self, cur: np.ndarray) -> np.ndarray:
         """Crossfade splice current chunk with carry from previous chunk.
@@ -730,6 +772,7 @@ class YapApp:
             settings.parallel,
             logger,
             max_chars=settings.max_chunk_chars,
+            save_audio_dir=settings.save_audio_dir,
         )
 
         # State
@@ -789,6 +832,10 @@ class YapApp:
             # Add our audio track to the peer connection
             self.client.add_outbound_audio_track(self.audio_track)
             self.log.info("Audio track added to WebRTC connection")
+
+            # Request audio-only media from the server
+            await self.client.request_media(audio=True, video=False)
+            self.log.info("Requested audio-only media session")
 
             # Start chat listener
             await asyncio.gather(

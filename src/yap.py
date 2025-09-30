@@ -222,6 +222,9 @@ class Settings:
     voices_dir: str = os.environ.get("YAP_VOICES_DIR", "./voices")
     default_speaker: str = os.environ.get("YAP_SPK_DEFAULT", "default")
 
+    # Debug/Testing
+    save_audio_dir: Optional[str] = field(default_factory=lambda: os.environ.get("YAP_SAVE_AUDIO_DIR", None))
+
     # Misc
     log_level: str = os.environ.get("YAP_LOGLEVEL", "INFO")
     log_format: str = os.environ.get("YAP_LOG_FORMAT", "text")  # 'text'|'json'
@@ -871,9 +874,10 @@ class TTSPipeline:
         parallel: int,
         logger: logging.Logger,
         max_chars: int,
+        save_audio_dir: Optional[str] = None,
     ) -> None:
         """Initialize TTS pipeline with voice manager and audio parameters.
-        
+
         :param voices: Voice manager instance
         :param tts: TTS synthesizer instance
         :param pcmq: PCM queue for audio output
@@ -883,6 +887,7 @@ class TTSPipeline:
         :param parallel: Number of parallel TTS workers
         :param logger: Logger instance
         :param max_chars: Maximum characters per chunk
+        :param save_audio_dir: Optional directory to save audio chunks for debugging
         """
         self.voices = voices
         self.tts = tts
@@ -895,6 +900,13 @@ class TTSPipeline:
         self._parallel = max(1, parallel)
         self._epoch = 0  # cancel token
         self.max_chars = max_chars
+        self.save_audio_dir = save_audio_dir
+        self._chunk_counter = 0
+
+        # Create save directory if specified
+        if self.save_audio_dir:
+            os.makedirs(self.save_audio_dir, exist_ok=True)
+            self._logger.info("Audio chunks will be saved to: %s", self.save_audio_dir)
 
         # splicer tail carry (last overlap samples)
         self._carry = np.zeros((0, ch_out), dtype=np.float32)
@@ -1007,6 +1019,9 @@ class TTSPipeline:
                     pcm_data = float_to_int16(out)
                     self._logger.debug("Pushing %d samples to PCM queue (%.2fs)", len(pcm_data), len(pcm_data) / self.sr_out)
                     self.q.push(pcm_data)
+                    # Save audio chunk if debug directory is configured
+                    if self.save_audio_dir and len(pcm_data) > 0:
+                        self._save_audio_chunk(pcm_data, next_idx)
                 next_idx += 1
 
         # drain the rest
@@ -1024,6 +1039,9 @@ class TTSPipeline:
                 pcm_data = float_to_int16(out)
                 self._logger.debug("Pushing %d samples to PCM queue (%.2fs)", len(pcm_data), len(pcm_data) / self.sr_out)
                 self.q.push(pcm_data)
+                # Save audio chunk if debug directory is configured
+                if self.save_audio_dir and len(pcm_data) > 0:
+                    self._save_audio_chunk(pcm_data, next_idx)
             next_idx += 1
 
         if flush_end:
@@ -1033,6 +1051,28 @@ class TTSPipeline:
                     self._logger.debug("Flushing final %d samples to PCM queue (%.2fs)", len(pcm_data), len(pcm_data) / self.sr_out)
                     self.q.push(pcm_data)
                     self._carry = np.zeros((0, self.ch_out), dtype=np.float32)
+
+    def _save_audio_chunk(self, pcm_data: np.ndarray, chunk_idx: int) -> None:
+        """Save audio chunk to disk for debugging.
+
+        :param pcm_data: PCM audio data as int16 array
+        :param chunk_idx: Chunk index for filename
+        """
+        try:
+            import wave
+            timestamp = time.time()
+            filename = os.path.join(
+                self.save_audio_dir,
+                f"chunk_{timestamp:.0f}_{chunk_idx:04d}.wav"
+            )
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(self.ch_out)
+                wf.setsampwidth(2)  # 2 bytes for int16
+                wf.setframerate(self.sr_out)
+                wf.writeframes(pcm_data.tobytes())
+            self._logger.debug("Saved audio chunk to: %s", filename)
+        except Exception as e:
+            self._logger.warning("Failed to save audio chunk: %s", e)
 
     @staticmethod
     def _tiny_fades(cur: np.ndarray, sr: int, ms: float = 4.0) -> np.ndarray:
@@ -1171,6 +1211,7 @@ class YapApp:
             settings.parallel,
             logger,
             max_chars=settings.max_chunk_chars,
+            save_audio_dir=settings.save_audio_dir,
         )
         self._shutdown = asyncio.Event()
         # Idle flush to emit tail when user pauses mid-sentence

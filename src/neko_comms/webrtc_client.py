@@ -72,7 +72,7 @@ class WebRTCNekoClient(NekoClient):
         self.ice_policy = kwargs.get("ice_policy", "strict")
         self.enable_audio = kwargs.get("enable_audio", True)
         self.rtcp_keepalive = kwargs.get("rtcp_keepalive", False)
-        self.request_media = kwargs.get("request_media", True)
+        self._request_media_enabled = kwargs.get("request_media", True)
 
         # Session management
         self.session_id: Optional[str] = None
@@ -130,7 +130,7 @@ class WebRTCNekoClient(NekoClient):
             await self.setup_video_lite()
 
             # Request media if enabled
-            if self.request_media:
+            if self._request_media_enabled:
                 await self._request_media()
 
             self._connection_state = ConnectionState.CONNECTED
@@ -280,6 +280,13 @@ class WebRTCNekoClient(NekoClient):
         self.pc.on("track", self._on_track)
         self.pc.on("iceconnectionstatechange", lambda: logger.info("iceConnectionState -> %s", self.pc.iceConnectionState))
         self.pc.on("connectionstatechange", lambda: logger.info("connectionState -> %s", self.pc.connectionState))
+
+        if self._outbound_audio_track:
+            try:
+                self.pc.addTrack(self._outbound_audio_track)
+                logger.info("Attached outbound audio track to peer connection")
+            except Exception as exc:
+                logger.warning("Failed to attach outbound audio track: %s", exc)
 
         logger.info("WebRTC peer connection initialized")
 
@@ -546,15 +553,28 @@ class WebRTCNekoClient(NekoClient):
         self._tasks.add(task)
 
     async def _request_media(self) -> None:
-        """Request media (video/audio) from the server."""
-        if not self.signaler:
-            return
+        """Request media (video/audio) from the server using default settings."""
+        await self.request_media()
 
-        payload = {"video": {}}
-        if self.enable_audio:
-            payload["audio"] = {}
+    async def request_media(self, *, audio: Optional[bool] = None, video: Optional[bool] = None) -> None:
+        """Explicitly request media renegotiation with configurable streams."""
+        if not self.signaler:
+            raise ConnectionError("Not connected to Neko server")
+
+        payload: Dict[str, Any] = {}
+
+        if video is None:
+            payload["video"] = {}
         else:
-            payload["audio"] = {"disabled": True}
+            payload["video"] = {} if video else {"disabled": True}
+
+        if audio is None:
+            if self.enable_audio:
+                payload["audio"] = {}
+            else:
+                payload["audio"] = {"disabled": True}
+        else:
+            payload["audio"] = {} if audio else {"disabled": True}
 
         await self.signaler.send({"event": "signal/request", "payload": payload})
 
@@ -707,10 +727,12 @@ class WebRTCNekoClient(NekoClient):
         :return: None
         :rtype: None
         """
+        self._outbound_audio_track = audio_track
         if self.pc:
-            self._outbound_audio_track = audio_track
             self.pc.addTrack(audio_track)
             logger.info("Added outbound audio track")
+        else:
+            logger.debug("Stored outbound audio track for later peer connection attachment")
 
     def get_video_track(self) -> Optional[VideoStreamTrack]:
         """Get the current video track.
