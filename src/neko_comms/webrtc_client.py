@@ -94,6 +94,9 @@ class WebRTCNekoClient(NekoClient):
         # Background tasks
         self._tasks = set()
 
+        # External listeners
+        self._system_event_listeners: List[Callable[[Dict[str, Any]], Any]] = []
+
         # Custom audio track for outbound audio (yap.py support)
         self._outbound_audio_track: Optional[AudioStreamTrack] = None
 
@@ -600,6 +603,10 @@ class WebRTCNekoClient(NekoClient):
             self.host_id = payload.get("host_id")
             logger.info("Session initialized: %s", self.session_id)
 
+            screen = payload.get("screen_size")
+            if isinstance(screen, dict):
+                self._update_frame_size(screen.get("width"), screen.get("height"))
+
         elif event == "control/host":
             # Host control status
             if self.auto_host and not payload.get("has_host"):
@@ -612,6 +619,11 @@ class WebRTCNekoClient(NekoClient):
                 self.session_id = session_id
                 logger.info("New session created: %s", session_id)
 
+        elif event == "screen/updated":
+            self._update_frame_size(payload.get("width"), payload.get("height"))
+
+        self._notify_system_listeners(msg)
+
     async def _process_chat_event(self, msg: Dict[str, Any]) -> None:
         """Process chat events - can be overridden for custom chat handling."""
         event = msg.get("event", "")
@@ -621,6 +633,44 @@ class WebRTCNekoClient(NekoClient):
             content = payload.get("content", "")
             member_id = payload.get("member_id")
             logger.debug("Chat message from %s: %s", member_id, content)
+
+    def add_system_listener(self, callback: Callable[[Dict[str, Any]], Any]) -> None:
+        """Register a callback for system events."""
+        if callback not in self._system_event_listeners:
+            self._system_event_listeners.append(callback)
+
+    def remove_system_listener(self, callback: Callable[[Dict[str, Any]], Any]) -> None:
+        """Remove a previously registered system event callback."""
+        try:
+            self._system_event_listeners.remove(callback)
+        except ValueError:
+            pass
+
+    def _notify_system_listeners(self, msg: Dict[str, Any]) -> None:
+        """Dispatch system events to registered listeners."""
+        for listener in list(self._system_event_listeners):
+            try:
+                result = listener(msg)
+                if asyncio.iscoroutine(result):
+                    task = asyncio.create_task(result)
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+            except Exception as exc:
+                logger.debug("System listener error: %s", exc, exc_info=True)
+
+    def _update_frame_size(self, width: Any, height: Any) -> None:
+        """Update cached frame size when the server reports dimensions."""
+        try:
+            w, h = int(width), int(height)
+        except (TypeError, ValueError):
+            return
+
+        if w <= 0 or h <= 0:
+            return
+
+        if self._frame_size != (w, h):
+            self._frame_size = (w, h)
+            logger.info("Frame size updated to %dx%d", w, h)
 
     async def send_event(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Send a raw event through the signaling channel."""

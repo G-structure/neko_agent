@@ -294,6 +294,11 @@ class NekoAgent:
         self.action_history: List[Dict[str, Any]] = []
         self.shutdown = asyncio.Event()
 
+        # Online mode task coordination
+        self._new_task_event = asyncio.Event()
+        self._is_running_task = False
+        self._pending_task: Optional[str] = None
+
         # WebRTC client configuration mirrors the legacy agent defaults
         ice_servers: List[Any] = []
         if self.settings.neko_stun_url:
@@ -396,16 +401,66 @@ class NekoAgent:
         """Online mode - wait for tasks from chat."""
         self.logger.info("Entering online mode - waiting for chat commands")
 
+        # Start chat message consumer as background task
+        async def chat_consumer():
+            while self.running and self.client.is_connected():
+                try:
+                    msg = await self.client.subscribe_topic("chat", timeout=5.0)
+                    await self._process_chat_message(msg)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    self.logger.error("Chat processing error: %s", e)
+                    break
+
+        # Run chat consumer in background and main task loop
+        try:
+            await asyncio.gather(
+                chat_consumer(),
+                self._task_loop(),
+                return_exceptions=True
+            )
+        except Exception as e:
+            self.logger.error("Online mode error: %s", e)
+
+    async def _task_loop(self) -> None:
+        """Main task execution loop for online mode."""
         while self.running and self.client.is_connected():
-            try:
-                # Subscribe to chat messages
-                msg = await self.client.subscribe_topic("chat", timeout=5.0)
-                await self._process_chat_message(msg)
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                self.logger.error("Chat processing error: %s", e)
+            # Wait for a task to be assigned
+            ready_announced = False
+            while not (self.nav_task and self.nav_task.strip()) and not self.shutdown.is_set():
+                if not ready_announced:
+                    await self._send_chat("Ready. Send a task in chat to begin.")
+                    ready_announced = True
+                try:
+                    await asyncio.wait_for(self._new_task_event.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    continue
+                finally:
+                    self._new_task_event.clear()
+
+            if self.shutdown.is_set():
                 break
+
+            # Execute the task
+            await self._send_chat(f"Starting task: {self.nav_task}")
+            self._is_running_task = True
+
+            try:
+                await self._execute_task(self.nav_task)
+            finally:
+                self._is_running_task = False
+
+            await self._send_chat(f"Completed task: {self.nav_task}")
+
+            # Handle any pending task or clear and wait for next
+            if self._pending_task:
+                self.nav_task = self._pending_task
+                self._pending_task = None
+                # Continue loop to start next task immediately
+            else:
+                self.nav_task = ""
+                # Loop will wait for next task
 
     async def _process_chat_message(self, msg: Dict[str, Any]) -> None:
         """Process a chat message for task commands.
@@ -422,10 +477,19 @@ class NekoAgent:
             task = text[6:].strip()
             if task:
                 self.logger.info("Received task from chat: %s", task)
-                await self._execute_task(task)
+                if self.online and self._is_running_task:
+                    self._pending_task = task
+                    self.logger.info("Task queued until current run completes.")
+                else:
+                    self.nav_task = task
+                    if self.online:
+                        self._new_task_event.set()
+            else:
+                await self._send_chat("Usage: /task <instruction>")
         elif text.startswith("/stop"):
             self.logger.info("Received stop command from chat")
             self.running = False
+            self.shutdown.set()
         elif text.startswith("/status"):
             status = f"Agent online, step {self.step_count}/{self.max_steps}"
             await self._send_chat(status)
@@ -489,6 +553,9 @@ class NekoAgent:
 
                 frames_received.inc()
 
+                # Track original frame size before resizing
+                original_frame_size = frame.size
+
                 # Resize frame if needed
                 frame = resize_and_validate_image(frame, self.settings.size_longest_edge, self.logger)
 
@@ -502,8 +569,8 @@ class NekoAgent:
                     self.logger.warning("Failed to generate valid action")
                     continue
 
-                # Execute action
-                await self._execute_action(action, frame)
+                # Execute action with original frame size for proper coordinate scaling
+                await self._execute_action(action, original_frame_size)
 
                 # Add to history
                 self.action_history.append(action)
@@ -542,7 +609,7 @@ class NekoAgent:
                 break
 
     async def _generate_action(self, frame: Image.Image, task: str, system_prompt: str) -> Optional[Dict[str, Any]]:
-        """Generate action using the vision model."""
+        """Generate action using the vision model with iterative refinement for clicks."""
 
         full_size = frame.size
         crop_box = (0, 0, full_size[0], full_size[1])
@@ -550,6 +617,16 @@ class NekoAgent:
 
         for iteration in range(self.settings.refinement_steps):
             current_frame = frame.crop(crop_box)
+
+            # Save refinement iteration frame if configured
+            if self.settings.click_save_path and iteration > 0:
+                try:
+                    refine_path = f"{self.settings.click_save_path}/step_{self.step_count:03d}_refine_{iteration}.png"
+                    save_atomic(current_frame, refine_path, self.logger)
+                    self.logger.debug("Saved refinement frame %d: %s", iteration, refine_path)
+                except Exception as e:
+                    self.logger.warning("Failed to save refinement frame: %s", e)
+
             output_text = await self._run_model_inference(
                 current_frame,
                 task,
@@ -571,22 +648,40 @@ class NekoAgent:
             final_action = action
             action_type = action.get("action")
 
+            # No refinement for non-click actions
             if action_type == "DONE":
                 break
 
+            # Refinement only applies to CLICK actions with valid position
             if action_type == "CLICK":
                 normalized = self._normalize_click_position(action, crop_box, full_size)
                 if normalized:
                     final_action["position"] = normalized
+                    self.logger.info("Refinement iteration %d/%d: normalized position = %s",
+                                   iteration + 1, self.settings.refinement_steps, normalized)
+
+                    # Continue refining if we have more iterations
                     if iteration < self.settings.refinement_steps - 1:
                         next_box = self._compute_refinement_box(normalized, crop_box, full_size)
                         if next_box:
                             crop_box = next_box
+                            self.logger.debug("Next crop box for refinement: %s", next_box)
                             continue
                 break
 
-            # No refinement for other action types
+            # Non-CLICK actions don't need refinement
             break
+
+        # Save final action-marked frame if configured
+        if final_action and self.settings.click_save_path:
+            try:
+                marked_frame = draw_action_markers(frame, final_action, self.step_count)
+                action_type = final_action.get("action", "unknown")
+                save_path = f"{self.settings.click_save_path}/step_{self.step_count:03d}_{action_type}_final.png"
+                save_atomic(marked_frame, save_path, self.logger)
+                self.logger.debug("Saved final action frame: %s", save_path)
+            except Exception as e:
+                self.logger.warning("Failed to save action frame: %s", e)
 
         return final_action
 
@@ -779,11 +874,11 @@ class NekoAgent:
 
         return (left, top, int(right), int(bottom))
 
-    async def _execute_action(self, action: Dict[str, Any], frame: Image.Image) -> None:
+    async def _execute_action(self, action: Dict[str, Any], frame_size: Tuple[int, int]) -> None:
         """Execute an action using the action executor.
 
         :param action: Action dictionary to execute
-        :param frame: Current frame for coordinate scaling
+        :param frame_size: Original frame size (width, height) for coordinate scaling
         """
         action_type = action.get("action")
         if not action_type:
@@ -801,19 +896,13 @@ class NekoAgent:
                 amount=action.get("amount"),
             )
 
-            await executor.execute_action(action_payload, frame.size)
+            await executor.execute_action(action_payload, frame_size)
 
             actions_executed.labels(action_type=action_type).inc()
             self.logger.info("Executed action: %s", action)
 
             # Emit action annotation for training data capture
             await self._emit_action_annotation(action)
-
-            # Save action-marked frame if configured
-            if self.settings.click_save_path:
-                marked_frame = draw_action_markers(frame, action, self.step_count)
-                save_path = f"{self.settings.click_save_path}/step_{self.step_count:03d}_{action_type}.png"
-                save_atomic(marked_frame, save_path, self.logger)
 
         except Exception as e:
             self.logger.error("Failed to execute action %s: %s", action, e)

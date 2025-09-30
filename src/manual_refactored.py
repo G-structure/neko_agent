@@ -44,6 +44,14 @@ else:
         datefmt='%H:%M:%S'
     )
 
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+YELLOW = "\033[93m"
+
 logger = logging.getLogger("neko_manual")
 
 # Suppress verbose logging from dependencies
@@ -82,6 +90,7 @@ class ManualController:
         self.running = True
         self._curx = 0
         self._cury = 0
+        self._system_events: asyncio.Queue = asyncio.Queue(maxsize=256)
 
         # Neko client
         self.client = WebRTCNekoClient(
@@ -89,6 +98,7 @@ class ManualController:
             auto_host=auto_host,
             request_media=True  # Enable WebRTC for full functionality
         )
+        self.client.add_system_listener(self._on_system_event)
 
     async def run(self) -> None:
         """Main run loop with connection management and REPL."""
@@ -99,6 +109,7 @@ class ManualController:
                 # Connect to Neko server
                 await self.client.connect()
                 logger.info("Connected to Neko server")
+                self._drain_system_queue()
 
                 # Set screen size
                 self.client.set_screen_size(self.width, self.height)
@@ -119,41 +130,115 @@ class ManualController:
             finally:
                 await self.client.disconnect()
 
+        self.client.remove_system_listener(self._on_system_event)
         logger.info("Manual control session ended")
 
     async def _event_logger(self) -> None:
         """Background task that logs server events."""
         try:
-            while self.running and self.client.is_connected():
+            while self.running:
+                if not self.client.is_connected():
+                    await asyncio.sleep(0.1)
+                    continue
+
                 try:
-                    # Log system events
-                    msg = await self.client.subscribe_topic("system", timeout=1.0)
-                    event = msg.get("event", "")
-                    payload = msg.get("payload", {})
-
-                    if event == "system/heartbeat":
-                        continue  # Skip noisy heartbeats
-
-                    logger.info("SYS: %s %s", event, payload)
-
+                    msg = await asyncio.wait_for(self._system_events.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
-                except Exception as e:
-                    logger.debug("Event logger error: %s", e)
-                    break
 
+                event = msg.get("event", "")
+                payload = msg.get("payload", {})
+
+                if event == "system/heartbeat":
+                    await self._safe_send("client/heartbeat")
+                    continue
+
+                logger.info("SYS: %s %s", event, payload)
+
+                if event == "system/init":
+                    self._handle_system_init(payload)
+                elif event == "screen/updated":
+                    self._handle_screen_updated(payload)
+
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error("Event logger failed: %s", e)
 
+    def _handle_system_init(self, payload: Dict[str, Any]) -> None:
+        """Process initial system payload to capture screen size."""
+        screen = payload.get("screen_size")
+        if isinstance(screen, dict):
+            self._update_screen_size(screen.get("width"), screen.get("height"))
+
+    def _handle_screen_updated(self, payload: Dict[str, Any]) -> None:
+        """Handle screen size updates from the server."""
+        self._update_screen_size(payload.get("width"), payload.get("height"))
+
+
+    def _update_screen_size(self, width: Optional[Any], height: Optional[Any]) -> None:
+        """Update local screen dimensions and inform the client."""
+        if width is None or height is None:
+            return
+
+        try:
+            new_width = int(width)
+            new_height = int(height)
+        except (TypeError, ValueError):
+            logger.debug("Ignoring invalid screen size payload: %s x %s", width, height)
+            return
+
+        if new_width <= 0 or new_height <= 0:
+            logger.debug("Ignoring non-positive screen size: %s x %s", new_width, new_height)
+            return
+
+        changed = (self.width != new_width) or (self.height != new_height)
+        self.width = new_width
+        self.height = new_height
+        self.client.set_screen_size(new_width, new_height)
+        if changed:
+            print(f"{CYAN}Screen size updated to {new_width}x{new_height}{RESET}")
+
+    def _on_system_event(self, msg: Dict[str, Any]) -> None:
+        """Fan-out system events to the local logger queue."""
+        try:
+            self._system_events.put_nowait(msg)
+        except asyncio.QueueFull:
+            logger.debug("Dropping system event due to full queue: %s", msg.get("event"))
+
+    def _drain_system_queue(self) -> None:
+        """Clear any buffered system events."""
+        while not self._system_events.empty():
+            try:
+                self._system_events.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    @staticmethod
+    def _colorize(color: str, message: str) -> str:
+        return f"{color}{message}{RESET}"
+
+    def _info(self, message: str) -> None:
+        print(self._colorize(GREEN, message))
+
+    def _warn(self, message: str) -> None:
+        print(self._colorize(YELLOW, message))
+
+    def _error(self, message: str) -> None:
+        print(self._colorize(RED, message))
+
+    def _note(self, message: str) -> None:
+        print(self._colorize(BLUE, message))
+
     async def _repl(self) -> None:
         """Interactive command REPL."""
-        print("Neko Manual Control - Type 'help' for commands")
+        print(f"\n{GREEN}Starting Neko manual CLI. Type 'help' for commands. Ctrl+D or 'quit' to exit.{RESET}")
 
         while self.running and self.client.is_connected():
             try:
                 # Get user input (non-blocking)
                 cmd = await asyncio.get_event_loop().run_in_executor(
-                    None, input, "neko> "
+                    None, input, f"{CYAN}neko> {RESET}"
                 )
 
                 if not cmd.strip():
@@ -166,6 +251,7 @@ class ManualController:
                 break
             except Exception as e:
                 logger.error("REPL error: %s", e)
+                self._error(f"REPL error: {e}")
 
     async def _handle_command(self, cmd_line: str) -> None:
         """Handle a single command.
@@ -245,65 +331,60 @@ class ManualController:
                 await self._handle_sessions()
 
             else:
-                print(f"Unknown command: {cmd}. Type 'help' for available commands.")
+                self._error(f"Unknown command: {cmd}. Type 'help' for available commands.")
 
         except Exception as e:
             logger.error("Command error: %s", e)
-            print(f"Error: {e}")
+            self._error(f"Error: {e}")
 
     async def _safe_send(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Send an event if the client is connected."""
         if not self.client.is_connected():
-            print("Not connected to server")
+            self._error("Not connected to server")
             return
 
         try:
             await self.client.send_event(event, payload)
         except Exception as exc:
             logger.error("Failed to send event %s: %s", event, exc)
-            print(f"Error sending event: {exc}")
+            self._error(f"Error sending event: {exc}")
 
     def _show_help(self) -> None:
         """Show help text."""
-        help_text = """
-Available commands:
-
-Movement & Clicking:
-  move X Y                - Move cursor to coordinates
-  click [X Y] [button]    - Click at coordinates (or current position)
-  rclick | lclick         - Right or left click aliases
-  dblclick [X Y]          - Double-click at coordinates
-  tap X Y [button]        - Move and click at coordinates
-  hover X Y               - Hover cursor at coordinates
-  swipe X1 Y1 X2 Y2       - Drag from point 1 to point 2
-
-Keyboard & Text:
-  key <keyname>           - Press a key (Escape, F5, etc.)
-  enter                   - Press the Enter/Return key
-  type <text>             - Type text at current focus
-  text <text>             - Alias for type
-  input X Y "text"        - Click at X,Y then type text
-  copy | cut | select_all - Clipboard shortcuts
-  paste [text]            - Paste clipboard or provided text
-
-Raw / Admin:
-  raw '{{"event":...}}'    - Send raw JSON event
-  host / unhost           - Request or release host control
-  force-take              - Force host control (admin)
-  force-release           - Force release host control (admin)
-  kick <sessionId>        - Kick a session (admin)
-  sessions                - List sessions (requires REST login)
-
-Other:
-  size [WIDTH HEIGHT]     - Show or set screen dimensions
-  scroll dir [amount]     - Scroll direction (up/down/left/right)
-  help                    - Show this help
-  quit / exit / q         - Exit program
-
-Coordinates:
-  - Use pixel coordinates (0,0 = top-left) unless --normalized
-  - Current screen size: {width}x{height}
-""".format(width=self.width, height=self.height)
+        help_text = (
+            f"{BOLD}Available commands{RESET}\n\n"
+            f"{BOLD}Movement & Clicking:{RESET}\n"
+            f"  {GREEN}move X Y{RESET}                Move cursor to coordinates\n"
+            f"  {GREEN}click [X Y] [button]{RESET}    Click at coordinates (or current position)\n"
+            f"  {GREEN}rclick{RESET} | {GREEN}lclick{RESET}         Right or left click aliases\n"
+            f"  {GREEN}dblclick [X Y]{RESET}          Double-click at coordinates\n"
+            f"  {GREEN}tap X Y [button]{RESET}        Move and click at coordinates\n"
+            f"  {GREEN}hover X Y{RESET}               Hover cursor at coordinates\n"
+            f"  {GREEN}swipe X1 Y1 X2 Y2{RESET}       Drag from point 1 to point 2\n\n"
+            f"{BOLD}Keyboard & Text:{RESET}\n"
+            f"  {GREEN}key <keyname>{RESET}           Press a key (Escape, F5, etc.)\n"
+            f"  {GREEN}enter{RESET}                   Press the Enter/Return key\n"
+            f"  {GREEN}type <text>{RESET}             Type text at current focus\n"
+            f"  {GREEN}text <text>{RESET}             Alias for type\n"
+            f"  {GREEN}input X Y \"text\"{RESET}        Click at X,Y then type text\n"
+            f"  {GREEN}copy{RESET} | {GREEN}cut{RESET} | {GREEN}select_all{RESET} Clipboard shortcuts\n"
+            f"  {GREEN}paste [text]{RESET}            Paste clipboard or provided text\n\n"
+            f"{BOLD}Raw / Admin:{RESET}\n"
+            f"  {BLUE}raw '{{\"event\":...}}'{RESET}    Send raw JSON event\n"
+            f"  {BLUE}host{RESET} / {BLUE}unhost{RESET}           Request or release host control\n"
+            f"  {BLUE}force-take{RESET}              Force host control (admin)\n"
+            f"  {BLUE}force-release{RESET}           Force release host control (admin)\n"
+            f"  {BLUE}kick <sessionId>{RESET}        Kick a session (admin)\n"
+            f"  {BLUE}sessions{RESET}                List sessions (requires REST login)\n\n"
+            f"{BOLD}Other:{RESET}\n"
+            f"  {YELLOW}size [WIDTH HEIGHT]{RESET}     Show or set screen dimensions\n"
+            f"  {YELLOW}scroll dir [amount]{RESET}     Scroll direction (up/down/left/right)\n"
+            f"  {YELLOW}help{RESET}                    Show this help\n"
+            f"  {YELLOW}quit / exit / q{RESET}         Exit program\n\n"
+            f"{BOLD}Coordinates:{RESET}\n"
+            f"  - Use pixel coordinates (0,0 = top-left) unless --normalized\n"
+            f"  - Current screen size: {self.width}x{self.height}\n"
+        )
         print(help_text)
 
     def _action_executor(self):
@@ -314,7 +395,7 @@ Coordinates:
     def _parse_text_argument(self, args: List[str], usage: str) -> Optional[str]:
         """Join and normalize quoted text arguments."""
         if not args:
-            print(usage)
+            self._warn(usage)
             return None
 
         text = " ".join(args)
@@ -346,7 +427,7 @@ Coordinates:
     async def _handle_move(self, args: list) -> None:
         """Handle move command."""
         if len(args) < 2:
-            print("Usage: move X Y")
+            self._warn("Usage: move X Y")
             return
 
         try:
@@ -358,10 +439,10 @@ Coordinates:
 
             # Send move command via action executor
             await self._action_executor().move(px, py)
-            print(f"Moved to ({px}, {py})")
+            self._info(f"Moved to ({px}, {py})")
 
         except ValueError:
-            print("Invalid coordinates")
+            self._error("Invalid coordinates")
 
     async def _handle_click(self, cmd: str, args: list) -> None:
         """Handle click-related commands."""
@@ -383,34 +464,34 @@ Coordinates:
                 self._curx, self._cury = px, py
                 await self._action_executor().move(px, py)
             except ValueError:
-                print("Invalid coordinates")
+                self._error("Invalid coordinates")
                 return
         else:
             px, py = self._curx, self._cury
 
         # Execute click
         if cmd == "hover":
-            print(f"Hovering at ({px}, {py})")
+            self._note(f"Hovering at ({px}, {py})")
         elif cmd == "dblclick":
             await self._action_executor().button_press(px, py, button)
             await asyncio.sleep(0.05)
             await self._action_executor().button_press(px, py, button)
-            print(f"Double-clicked {button} at ({px}, {py})")
+            self._info(f"Double-clicked {button} at ({px}, {py})")
         else:
             await self._action_executor().button_press(px, py, button)
-            print(f"Clicked {button} at ({px}, {py})")
+            self._info(f"Clicked {button} at ({px}, {py})")
 
     async def _handle_scroll(self, args: list) -> None:
         """Handle scroll command."""
         if not args:
-            print("Usage: scroll up|down|left|right [amount]")
+            self._warn("Usage: scroll up|down|left|right [amount]")
             return
 
         direction = args[0].lower()
         try:
             amount = int(args[1]) if len(args) > 1 else 1
         except ValueError:
-            print("Invalid scroll amount")
+            self._error("Invalid scroll amount")
             return
 
         # Map direction to scroll deltas
@@ -422,17 +503,17 @@ Coordinates:
         }
 
         if direction not in delta_map:
-            print("Invalid scroll direction. Use: up, down, left, right")
+            self._error("Invalid scroll direction. Use: up, down, left, right")
             return
 
         dx, dy = delta_map[direction]
         await self._action_executor().scroll(dx, dy)
-        print(f"Scrolled {direction} (amount: {amount})")
+        self._info(f"Scrolled {direction} (amount: {amount})")
 
     async def _handle_swipe(self, args: list) -> None:
         """Handle swipe command."""
         if len(args) < 4:
-            print("Usage: swipe X1 Y1 X2 Y2")
+            self._warn("Usage: swipe X1 Y1 X2 Y2")
             return
 
         try:
@@ -443,25 +524,25 @@ Coordinates:
             p2 = self._xy(x2, y2)
 
             await self._action_executor().swipe(p1[0], p1[1], p2[0], p2[1])
-            print(f"Swiped from {p1} to {p2}")
+            self._info(f"Swiped from {p1} to {p2}")
 
         except ValueError:
-            print("Invalid coordinates")
+            self._error("Invalid coordinates")
 
     async def _handle_key(self, args: list) -> None:
         """Handle key command."""
         if not args:
-            print("Usage: key <keyname>")
+            self._warn("Usage: key <keyname>")
             return
 
         key = " ".join(args)
         ks = name_keysym(key)
         if not ks:
-            print(f"Unknown key: {key}")
+            self._error(f"Unknown key: {key}")
             return
 
         await self._action_executor().key_once(key)
-        print(f"Pressed key: {key}")
+        self._info(f"Pressed key: {key}")
 
     async def _handle_type(self, args: list) -> None:
         """Handle type command."""
@@ -470,23 +551,23 @@ Coordinates:
             return
 
         await self._action_executor().type_text(text)
-        print(f"Typed: {text}")
+        self._info(f"Typed: {text}")
 
     async def _handle_enter(self) -> None:
         """Handle enter command."""
         await self._action_executor().key_once("Enter")
-        print("Pressed Enter")
+        self._info("Pressed Enter")
 
     async def _handle_input(self, args: List[str]) -> None:
         """Handle input command to click and type text."""
         if len(args) < 3:
-            print("Usage: input X Y \"text\"")
+            self._warn("Usage: input X Y \"text\"")
             return
 
         try:
             x, y = float(args[0]), float(args[1])
         except ValueError:
-            print("Invalid coordinates")
+            self._error("Invalid coordinates")
             return
 
         text = self._parse_text_argument(args[2:], "Usage: input X Y \"text\"")
@@ -498,7 +579,7 @@ Coordinates:
         await self._action_executor().button_press(px, py, "left")
         await asyncio.sleep(0.05)
         await self._action_executor().type_text(text)
-        print(f"Clicked ({px}, {py}) and typed: {text}")
+        self._info(f"Clicked ({px}, {py}) and typed: {text}")
 
     async def _handle_clipboard(self, cmd: str) -> None:
         """Handle clipboard-related commands."""
@@ -506,21 +587,21 @@ Coordinates:
 
         if cmd == "copy":
             await executor.copy()
-            print("Copied selection")
+            self._info("Copied selection")
             return
 
         if cmd == "cut":
             await executor.key_down("Control")
             await executor.key_once("x")
             await executor.key_up("Control")
-            print("Cut selection")
+            self._info("Cut selection")
             return
 
         if cmd == "select_all":
             await executor.key_down("Control")
             await executor.key_once("a")
             await executor.key_up("Control")
-            print("Selected all")
+            self._info("Selected all")
             return
 
     async def _handle_paste(self, args: List[str]) -> None:
@@ -534,61 +615,61 @@ Coordinates:
         payload = {"text": text or ""}
         await self._safe_send("control/paste", payload)
         if text:
-            print(f"Pasted text: {text}")
+            self._info(f"Pasted text: {text}")
         else:
-            print("Requested paste from clipboard")
+            self._info("Requested paste from clipboard")
 
     async def _handle_raw(self, args: List[str]) -> None:
         """Send raw JSON message."""
         if not args:
-            print("Usage: raw '{\"event\":..., \"payload\":{...}}'")
+            self._warn("Usage: raw '{\"event\":..., \"payload\":{...}}'")
             return
 
         raw = " ".join(args)
         try:
             message = json.loads(raw)
         except json.JSONDecodeError as exc:
-            print(f"Invalid JSON: {exc}")
+            self._error(f"Invalid JSON: {exc}")
             return
 
         if not isinstance(message, dict) or "event" not in message:
-            print("JSON must include 'event'")
+            self._error("JSON must include 'event'")
             return
 
         event = message["event"]
         payload = message.get("payload")
         if payload is not None and not isinstance(payload, dict):
-            print("payload must be an object if provided")
+            self._error("payload must be an object if provided")
             return
 
         await self._safe_send(event, payload)
-        print(f"Sent raw event: {event}")
+        self._info(f"Sent raw event: {event}")
 
     async def _handle_force(self, take: bool) -> None:
         """Handle force host commands."""
         session_id = self.client.session_id
         if not session_id:
-            print("Session ID unknown; wait for connection to stabilize")
+            self._warn("Session ID unknown; wait for connection to stabilize")
             return
 
         event = "admin/control" if take else "admin/release"
         await self._safe_send(event, {"id": session_id})
-        print(("Force-take" if take else "Force-release") + " sent")
+        self._info(("Force-take" if take else "Force-release") + " sent")
 
     async def _handle_kick(self, args: List[str]) -> None:
         """Handle kick command."""
         if not args:
-            print("Usage: kick <sessionId>")
+            self._warn("Usage: kick <sessionId>")
             return
 
         target = args[0]
         await self._safe_send("admin/kick", {"id": target})
-        print(f"Kick sent for session {target}")
+        self._info(f"Kick sent for session {target}")
 
     async def _handle_sessions(self) -> None:
         """List active sessions via REST API."""
         if not self.base_url or not self.token:
-            print("Sessions command requires REST login (provide --neko-url credentials)")
+            self._warn("Sessions command requires REST login (provide --neko-url credentials)")
             return
 
         url = f"{self.base_url}/api/sessions"
@@ -599,50 +680,50 @@ Coordinates:
             response.raise_for_status()
         except Exception as exc:
             logger.error("Failed to fetch sessions: %s", exc)
-            print(f"Error fetching sessions: {exc}")
+            self._error(f"Error fetching sessions: {exc}")
             return
 
         try:
             data = response.json()
         except ValueError as exc:
-            print(f"Invalid JSON from sessions endpoint: {exc}")
+            self._error(f"Invalid JSON from sessions endpoint: {exc}")
             return
 
         if not data:
-            print("No active sessions")
+            self._warn("No active sessions")
             return
 
         if isinstance(data, list):
-            print("Sessions:")
+            print(f"{BOLD}Sessions:{RESET}")
             for sess in data:
                 sid = sess.get("id") or sess.get("session_id")
                 user = sess.get("username") or sess.get("user", {}).get("username")
                 has_host = sess.get("has_host") or sess.get("host")
-                print(f"  - id={sid} user={user} host={has_host}")
+                print(f"  {GREEN}{sid}{RESET} - user={user} host={has_host}")
         else:
-            print(json.dumps(data, indent=2, ensure_ascii=False))
+            self._note(json.dumps(data, indent=2, ensure_ascii=False))
 
     async def _handle_size(self, args: list) -> None:
         """Handle size command."""
         if not args:
-            print(f"Current size: {self.width}x{self.height} normalized={self.normalized}")
+            self._note(f"Current size: {self.width}x{self.height} normalized={self.normalized}")
             return
 
         if len(args) < 2:
-            print("Usage: size WIDTH HEIGHT")
+            self._warn("Usage: size WIDTH HEIGHT")
             return
 
         try:
             width = int(args[0])
             height = int(args[1])
         except ValueError:
-            print("Invalid dimensions")
+            self._error("Invalid dimensions")
             return
 
         self.width = width
         self.height = height
         self.client.set_screen_size(width, height)
-        print(f"Screen size set to {width}x{height}")
+        self._info(f"Screen size set to {width}x{height}")
 
 
 async def main():
@@ -671,7 +752,7 @@ async def main():
         try:
             ws_url, base_url, token = rest_login_and_ws_url(args.neko_url, args.username, args.password)
         except ValueError as e:
-            print(f"Login failed: {e}")
+            print(f"{RED}Login failed: {e}{RESET}")
             sys.exit(1)
     else:
         # Try environment variables
@@ -686,10 +767,10 @@ async def main():
             try:
                 ws_url, base_url, token = rest_login_and_ws_url(neko_url, username, password)
             except ValueError as e:
-                print(f"Login failed: {e}")
+                print(f"{RED}Login failed: {e}{RESET}")
                 sys.exit(1)
         else:
-            print("Error: Must provide either --ws URL or --neko-url + credentials")
+            print(f"{RED}Error: Must provide either --ws URL or --neko-url + credentials{RESET}")
             sys.exit(1)
 
     # Create and run controller
