@@ -29,14 +29,13 @@ from distutils.util import strtobool
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-import torch
 from PIL import Image
 from metrics import (
     frames_received, actions_executed, parse_errors, navigation_steps,
     inference_latency, reconnects, resize_duration, start_metrics_server
 )
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
+from agents import VisionAgent
 from neko_comms import WebRTCNekoClient, safe_parse_action
 from neko_comms.types import ACTION_SPACES, ACTION_SPACE_DESC, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
@@ -60,6 +59,7 @@ class Settings:
     """Centralized configuration settings loaded from environment variables."""
 
     # Model configuration
+    agent_type: str
     repo_id: str
     size_shortest_edge: int
     size_longest_edge: int
@@ -130,6 +130,7 @@ class Settings:
             audio_default = audio_raw.strip().lower() not in {"0", "false", "off", "no", ""}
 
         return cls(
+            agent_type=os.environ.get("NEKO_AGENT_TYPE", "showui"),
             repo_id=os.environ.get("REPO_ID", "showlab/ShowUI-2B"),
             size_shortest_edge=int(os.environ.get("SIZE_SHORTEST_EDGE", "224")),
             size_longest_edge=int(os.environ.get("SIZE_LONGEST_EDGE", "1344")),
@@ -162,6 +163,8 @@ class Settings:
         :return: List of validation error messages, empty if valid
         """
         errors = []
+        if self.agent_type not in ("showui", "claude", "qwen3vl"):
+            errors.append("NEKO_AGENT_TYPE must be 'showui', 'claude', or 'qwen3vl'")
         if self.size_shortest_edge <= 0:
             errors.append("SIZE_SHORTEST_EDGE must be positive")
         if self.size_longest_edge <= 0:
@@ -246,12 +249,11 @@ _NAV_SYSTEM = (
 # Main Agent Class
 # ----------------------
 class NekoAgent:
-    """ShowUI-2B Neko WebRTC GUI automation agent using WebRTCNekoClient."""
+    """Neko WebRTC GUI automation agent using pluggable vision models."""
 
     def __init__(
         self,
-        model: Any,
-        processor: Any,
+        vision_agent: VisionAgent,
         ws_url: str,
         nav_task: str,
         nav_mode: str,
@@ -264,8 +266,7 @@ class NekoAgent:
     ):
         """Initialize the Neko agent.
 
-        :param model: The vision model for inference
-        :param processor: The model processor for input preparation
+        :param vision_agent: The vision agent for action generation
         :param ws_url: WebSocket URL for Neko connection
         :param nav_task: Initial navigation task
         :param nav_mode: Navigation mode ('web' or 'phone')
@@ -276,8 +277,7 @@ class NekoAgent:
         :param audio: Enable/disable audio stream
         :param online: Keep running after task completion
         """
-        self.model = model
-        self.processor = processor
+        self.vision_agent = vision_agent
         self.ws_url = ws_url
         self.nav_task = nav_task
         self.nav_mode = nav_mode
@@ -319,9 +319,6 @@ class NekoAgent:
             auto_host=True,
             request_media=True,
         )
-
-        # Executor for model inference
-        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inference")
 
         # Metrics server handles (injected by main)
         self._metrics_server = None
@@ -609,7 +606,7 @@ class NekoAgent:
                 break
 
     async def _generate_action(self, frame: Image.Image, task: str, system_prompt: str) -> Optional[Dict[str, Any]]:
-        """Generate action using the vision model with iterative refinement for clicks."""
+        """Generate action using the vision agent with iterative refinement for clicks."""
 
         full_size = frame.size
         crop_box = (0, 0, full_size[0], full_size[1])
@@ -627,13 +624,15 @@ class NekoAgent:
                 except Exception as e:
                     self.logger.warning("Failed to save refinement frame: %s", e)
 
-            output_text = await self._run_model_inference(
-                current_frame,
-                task,
-                system_prompt,
-                crop_box,
-                iteration,
-                full_size,
+            # Delegate to vision agent for inference
+            output_text = await self.vision_agent.generate_action(
+                image=current_frame,
+                task=task,
+                system_prompt=system_prompt,
+                action_history=self.action_history,
+                crop_box=crop_box,
+                iteration=iteration,
+                full_size=full_size,
             )
 
             if not output_text:
@@ -688,126 +687,6 @@ class NekoAgent:
                 self.logger.warning("Failed to save action frame: %s", e)
 
         return final_action
-
-    async def _run_model_inference(
-        self,
-        image: Image.Image,
-        task: str,
-        system_prompt: str,
-        crop_box: Tuple[int, int, int, int],
-        iteration: int,
-        full_size: Tuple[int, int],
-    ) -> Optional[str]:
-        """Run the vision-language model and return the raw output text."""
-
-        user_text, history_text = self._build_prompt_components(
-            task, crop_box, iteration, full_size
-        )
-
-        segments: List[Dict[str, Any]] = [
-            {"type": "text", "text": system_prompt},
-            {"type": "text", "text": user_text},
-        ]
-        if history_text:
-            segments.append({"type": "text", "text": history_text})
-        segments.append(
-            {
-                "type": "image",
-                "image": image,
-                "size": {
-                    "shortest_edge": self.settings.size_shortest_edge,
-                    "longest_edge": self.settings.size_longest_edge,
-                },
-            }
-        )
-
-        messages = [{"role": "user", "content": segments}]
-
-        future: Optional[asyncio.Future[str]] = None
-        try:
-            text_input = self.processor.apply_chat_template(
-                messages, add_generation_prompt=True
-            )
-            inputs = self.processor(
-                text=[text_input],
-                images=[image],
-                padding=True,
-                return_tensors="pt",
-            ).to(self.model.device)
-
-            loop = asyncio.get_running_loop()
-
-            def _inference() -> str:
-                with torch.no_grad():
-                    t0 = time.monotonic()
-                    output_ids = self.model.generate(
-                        **inputs,
-                        max_new_tokens=256,
-                        do_sample=False,
-                        temperature=0.0,
-                        pad_token_id=self.processor.tokenizer.eos_token_id,
-                    )
-                    inference_latency.observe(time.monotonic() - t0)
-                    output_text = self.processor.decode(
-                        output_ids[0][len(inputs["input_ids"][0]):],
-                        skip_special_tokens=True,
-                    ).strip()
-                    return output_text
-
-            future = loop.run_in_executor(self.executor, _inference)
-            output_text = await asyncio.wait_for(
-                future, timeout=self.settings.inference_timeout
-            )
-            return output_text
-        except asyncio.TimeoutError:
-            if future:
-                future.cancel()
-            self.logger.error(
-                "Model inference timed out after %.1fs",
-                self.settings.inference_timeout,
-            )
-            parse_errors.inc()
-            return None
-        except Exception as e:
-            self.logger.error("Inference failed: %s", e, exc_info=True)
-            parse_errors.inc()
-            return None
-
-    def _build_prompt_components(
-        self,
-        task: str,
-        crop_box: Tuple[int, int, int, int],
-        iteration: int,
-        full_size: Tuple[int, int],
-    ) -> Tuple[str, Optional[str]]:
-        """Create the textual components for the multimodal prompt."""
-
-        if iteration == 0:
-            user_text = f"Task: {task}\n\nCurrent observation:"
-        else:
-            full_w, full_h = full_size
-            crop_w = max(crop_box[2] - crop_box[0], 1)
-            crop_h = max(crop_box[3] - crop_box[1], 1)
-            cx = ((crop_box[0] + crop_box[2]) / 2) / full_w if full_w else 0.5
-            cy = ((crop_box[1] + crop_box[3]) / 2) / full_h if full_h else 0.5
-            span_x = crop_w / full_w if full_w else 1.0
-            span_y = crop_h / full_h if full_h else 1.0
-            user_text = (
-                f"Task: {task}\n\n"
-                f"Refinement pass {iteration + 1} of {self.settings.refinement_steps} "
-                f"zoomed near normalized coords ({cx:.2f}, {cy:.2f}) "
-                f"with approx span ({span_x:.2f}, {span_y:.2f}).\n\nCurrent observation:"
-            )
-
-        history_text: Optional[str] = None
-        if self.action_history:
-            history_lines = [
-                f"{idx}. {json.dumps(act, ensure_ascii=False)}"
-                for idx, act in enumerate(self.action_history[-5:], 1)
-            ]
-            history_text = "Previous actions:\n" + "\n".join(history_lines)
-
-        return user_text, history_text
 
     @staticmethod
     def _action_has_point_position(action: Dict[str, Any]) -> bool:
@@ -966,9 +845,9 @@ class NekoAgent:
         """Clean up resources before shutdown."""
         self.logger.info("Cleaning up agent resources")
 
-        # Shutdown executor
-        if self.executor:
-            self.executor.shutdown(wait=True, cancel_futures=True)
+        # Clean up vision agent
+        with contextlib.suppress(Exception):
+            await self.vision_agent.cleanup()
 
         # Disconnect client
         with contextlib.suppress(Exception):
@@ -1063,45 +942,15 @@ async def main() -> None:
     metrics_port = args.metrics_port if args.metrics_port is not None else settings.metrics_port
     metrics_server, metrics_thread = start_metrics_server(metrics_port, logger)
 
-    logger.info("Loading model/processor ...")
-    device = "cpu"
-    dtype = torch.float32
+    # Create vision agent using factory
+    logger.info("Creating vision agent: %s", settings.agent_type)
 
-    if torch.cuda.is_available():
-        device = "cuda"
-        dtype = torch.bfloat16
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-        logger.info("CUDA GPU detected: %s (%.1fGB)", gpu_name, gpu_memory)
-    elif torch.backends.mps.is_available():
-        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-        try:
-            _ = torch.zeros(1, dtype=torch.bfloat16, device="mps")
-            dtype = torch.bfloat16
-        except RuntimeError:
-            dtype = torch.float32
-        device = "mps"
-        logger.info("Apple MPS detected")
-        os.makedirs(settings.offload_folder, exist_ok=True)
-    else:
-        logger.warning("No GPU acceleration available - using CPU")
+    from agents import create_vision_agent
+    vision_agent = create_vision_agent(settings.agent_type, settings, logger)
 
-    model_kwargs: Dict[str, Any] = {"torch_dtype": dtype, "device_map": "auto"}
-    if device == "mps":
-        model_kwargs.update({"offload_folder": settings.offload_folder, "offload_state_dict": True})
-
-    model = Qwen2VLForConditionalGeneration.from_pretrained(settings.repo_id, **model_kwargs).eval()
-    processor = AutoProcessor.from_pretrained(
-        settings.repo_id,
-        size={"shortest_edge": settings.size_shortest_edge, "longest_edge": settings.size_longest_edge},
-        trust_remote_code=True
-    )
-
-    logger.info("Model loaded successfully on device: %s (dtype: %s)", model.device, dtype)
-
-    if device == "cuda":
-        allocated_memory = torch.cuda.memory_allocated(0) / 1e9
-        logger.info("GPU memory allocated: %.2fGB", allocated_memory)
+    # Log device info
+    device_info = vision_agent.get_device_info()
+    logger.info("Vision agent initialized: %s", device_info)
 
     # Determine WebSocket URL
     ws_url = args.ws
@@ -1129,8 +978,7 @@ async def main() -> None:
 
     # Create agent with dependency injection
     agent = NekoAgent(
-        model=model,
-        processor=processor,
+        vision_agent=vision_agent,
         ws_url=ws_url,
         nav_task=args.task,
         nav_mode=args.mode,
