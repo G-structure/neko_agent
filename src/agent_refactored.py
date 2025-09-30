@@ -109,6 +109,8 @@ class Settings:
     openrouter_top_p: float
     openrouter_max_retries: int
     openrouter_timeout: int
+    openrouter_reasoning_enabled: bool
+    openrouter_reasoning_effort: Optional[str]
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -182,6 +184,8 @@ class Settings:
             openrouter_top_p=float(os.environ.get("OPENROUTER_TOP_P", "1.0")),
             openrouter_max_retries=int(os.environ.get("OPENROUTER_MAX_RETRIES", "3")),
             openrouter_timeout=int(os.environ.get("OPENROUTER_TIMEOUT", "60")),
+            openrouter_reasoning_enabled=_coerce_bool(os.environ.get("OPENROUTER_REASONING_ENABLED", "1")),
+            openrouter_reasoning_effort=os.environ.get("OPENROUTER_REASONING_EFFORT"),
         )
 
     def validate(self) -> List[str]:
@@ -233,6 +237,8 @@ class Settings:
                 errors.append("OPENROUTER_TOP_P must be between 0.0 and 1.0")
             if self.openrouter_timeout <= 0:
                 errors.append("OPENROUTER_TIMEOUT must be positive")
+            if self.openrouter_reasoning_effort and self.openrouter_reasoning_effort not in ("low", "medium", "high"):
+                errors.append("OPENROUTER_REASONING_EFFORT must be 'low', 'medium', or 'high'")
 
         return errors
 
@@ -1068,6 +1074,12 @@ async def main() -> None:
     # Inject metrics server handles for clean shutdown
     agent._metrics_server = metrics_server
     agent._metrics_thread = metrics_thread
+
+    # Wire up chat callback for OpenRouter agents (for thinking tokens)
+    from agents.remote_agent import OpenRouterAgent
+    if isinstance(vision_agent, OpenRouterAgent):
+        vision_agent.chat_callback = agent._send_chat
+        logger.debug("Chat callback wired up for OpenRouter agent")
 
     try:
         await agent.run()

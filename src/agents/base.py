@@ -1,7 +1,7 @@
 """Abstract base class for vision agents."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image
 
@@ -12,7 +12,12 @@ class VisionAgent(ABC):
     Vision agents process screen images and task descriptions to generate structured
     action commands for GUI automation. This interface abstracts the model implementation,
     allowing for local models (ShowUI, Qwen2VL) or remote APIs (Claude Computer Use, etc).
+
+    Attributes:
+        chat_callback: Optional callback for sending chat messages (e.g., thinking tokens)
     """
+
+    chat_callback: Optional[Callable[[str], Any]] = None
 
     @abstractmethod
     async def generate_action(

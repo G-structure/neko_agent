@@ -5,7 +5,7 @@ import base64
 import io
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import httpx
 from PIL import Image
@@ -77,15 +77,17 @@ class OpenRouterAgent(VisionAgent):
     - Async HTTP with retry logic
     """
 
-    def __init__(self, settings: 'Settings', logger: logging.Logger):
+    def __init__(self, settings: 'Settings', logger: logging.Logger, chat_callback: Optional[Callable[[str], Any]] = None):
         """Initialize OpenRouter agent.
 
         :param settings: Configuration settings
         :param logger: Logger instance
+        :param chat_callback: Optional callback for sending chat messages (e.g., thinking tokens)
         :raises ValueError: If API key is missing
         """
         self.settings = settings
         self.logger = logger
+        self.chat_callback = chat_callback
 
         # Validate API key
         if not settings.openrouter_api_key:
@@ -151,6 +153,9 @@ class OpenRouterAgent(VisionAgent):
 
             # Call API with retry logic
             response = await self._call_api_with_retry(messages)
+
+            # Extract and send thinking tokens if available
+            await self._extract_and_send_thinking(response)
 
             # Parse response
             return self._parse_response(response, crop_box, full_size)
@@ -270,6 +275,13 @@ class OpenRouterAgent(VisionAgent):
             payload["tools"] = [COMPUTER_USE_TOOL]
             payload["tool_choice"] = "auto"
 
+        # Add reasoning configuration if enabled
+        if self.settings.openrouter_reasoning_enabled:
+            reasoning_config = {"enabled": True}
+            if self.settings.openrouter_reasoning_effort:
+                reasoning_config["effort"] = self.settings.openrouter_reasoning_effort
+            payload["reasoning"] = reasoning_config
+
         self.logger.debug(
             "Calling OpenRouter API with model: %s",
             self.settings.openrouter_model
@@ -283,6 +295,39 @@ class OpenRouterAgent(VisionAgent):
         response.raise_for_status()
 
         return response.json()
+
+    async def _extract_and_send_thinking(self, response: Dict[str, Any]) -> None:
+        """Extract thinking/reasoning tokens from response and send via chat callback.
+
+        :param response: API response dictionary
+        """
+        if not self.chat_callback:
+            return
+
+        try:
+            # Check for reasoning_details in response
+            choice = response.get("choices", [{}])[0]
+            reasoning_details = choice.get("reasoning_details")
+
+            if not reasoning_details:
+                return
+
+            # Extract text from reasoning details
+            # According to OpenRouter docs, reasoning_details is an array
+            for detail in reasoning_details:
+                if isinstance(detail, dict):
+                    # Extract text content
+                    reasoning_text = detail.get("text") or detail.get("content")
+                    if reasoning_text:
+                        # Send thinking token via callback
+                        if asyncio.iscoroutinefunction(self.chat_callback):
+                            await self.chat_callback(f"[thinking] {reasoning_text}")
+                        else:
+                            self.chat_callback(f"[thinking] {reasoning_text}")
+                        self.logger.debug("Sent thinking token: %s chars", len(reasoning_text))
+
+        except Exception as e:
+            self.logger.debug("Failed to extract thinking tokens: %s", e)
 
     def _parse_response(
         self,
