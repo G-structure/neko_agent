@@ -386,6 +386,8 @@ class NekoAgent:
             # Offline mode - execute single task
             if self.nav_task.strip():
                 await self._execute_task(self.nav_task)
+                self.logger.info("Offline mode; requesting clean shutdown.")
+                self.shutdown.set()
             else:
                 self.logger.info("No task provided, entering online mode")
                 await self._online_mode()
