@@ -21,7 +21,6 @@ from aiortc import (
     RTCIceCandidate,
     VideoStreamTrack,
     AudioStreamTrack,
-    MediaStreamError,
 )
 from aiortc.sdp import candidate_from_sdp
 from PIL import Image

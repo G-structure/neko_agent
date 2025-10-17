@@ -14,7 +14,7 @@ from io import BytesIO
 from typing import Any, Optional
 
 from PIL import Image
-from aiortc import VideoStreamTrack, MediaStreamError
+from aiortc import VideoStreamTrack
 
 from .types import Frame
 
@@ -198,7 +198,7 @@ class WebRTCFrameSource(FrameSource):
                             self.first_frame.set()
                         self.frame_event.set()
 
-                except MediaStreamError:
+                except StopAsyncIteration:
                     logger.info("WebRTC video stream ended")
                     break
                 except Exception as e:

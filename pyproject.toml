@@ -7,7 +7,7 @@ name = "neko-agent"
 version = "0.1.0"
 description = "AI-powered automation system for Neko servers via WebRTC"
 authors = [{name = "Neko Agent Team"}]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.0.0",
     "transformers>=4.30.0",
@@ -18,10 +18,11 @@ dependencies = [
     "prometheus-client>=0.17.0",
     "accelerate>=0.20.0",
     "datasets>=2.14.0",
-    "streaming>=0.7.0",
+    "mosaicml-streaming>=0.7.0",
     "f5-tts>=0.0.1",
     "httpx>=0.27.0",
     "tenacity>=8.2.0",
+    "python-dotenv>=1.1.1",
 ]
 
 [project.optional-dependencies]
@@ -49,3 +50,6 @@ ignore = ["E501"]  # Line too long (handled by black)
 
 [tool.ruff.isort]
 force-single-line = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
