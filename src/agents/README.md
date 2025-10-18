@@ -4,7 +4,7 @@ This directory contains pluggable vision model implementations for the Neko auto
 
 ## Overview
 
-The agent has been refactored to support multiple vision models through a clean interface abstraction:
+The agent supports multiple vision models through a clean interface abstraction:
 
 ```
 src/agents/

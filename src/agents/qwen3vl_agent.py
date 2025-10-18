@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .remote_agent import OpenRouterAgent
 
 if TYPE_CHECKING:
-    from ..agent_refactored import Settings
+    from ..agent import Settings
 
 
 class Qwen3VLAgent(OpenRouterAgent):
@@ -22,7 +22,7 @@ class Qwen3VLAgent(OpenRouterAgent):
     - qwen/qwen2.5-vl-72b-instruct (Paid, best performance)
     """
 
-    def __init__(self, settings: 'Settings', logger: logging.Logger):
+    def __init__(self, settings: "Settings", logger: logging.Logger):
         """Initialize Qwen3VL agent with Qwen-specific defaults.
 
         :param settings: Configuration settings
@@ -31,8 +31,7 @@ class Qwen3VLAgent(OpenRouterAgent):
         # Override model with Qwen-specific default if not set
         if not settings.openrouter_model or settings.openrouter_model == "default":
             settings.openrouter_model = os.environ.get(
-                "QWEN_VL_MODEL",
-                "qwen/qwen2.5-vl-72b-instruct"
+                "QWEN_VL_MODEL", "qwen/qwen2.5-vl-72b-instruct"
             )
 
         if not getattr(settings, "prompt_strategy", None):
@@ -45,6 +44,5 @@ class Qwen3VLAgent(OpenRouterAgent):
         self.use_tools = True
 
         self.logger.info(
-            "Qwen3VL agent initialized with model: %s",
-            settings.openrouter_model
+            "Qwen3VL agent initialized with model: %s", settings.openrouter_model
         )

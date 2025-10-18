@@ -21,7 +21,7 @@ from .parsing import parse_tool_call, parse_text_response
 from .reasoning import extract_think_segments
 
 if TYPE_CHECKING:
-    from ..agent_refactored import Settings
+    from ..agent import Settings
 
 
 # Computer Use tool definition (Qwen-compatible format)
@@ -78,7 +78,12 @@ class OpenRouterAgent(VisionAgent):
     - Async HTTP with retry logic
     """
 
-    def __init__(self, settings: 'Settings', logger: logging.Logger, chat_callback: Optional[Callable[[str], Any]] = None):
+    def __init__(
+        self,
+        settings: "Settings",
+        logger: logging.Logger,
+        chat_callback: Optional[Callable[[str], Any]] = None,
+    ):
         """Initialize OpenRouter agent.
 
         :param settings: Configuration settings
@@ -86,7 +91,9 @@ class OpenRouterAgent(VisionAgent):
         :param chat_callback: Optional callback for sending chat messages (e.g., thinking tokens)
         :raises ValueError: If API key is missing
         """
-        super().__init__(settings, logger, default_prompt_strategy="conversational_chain")
+        super().__init__(
+            settings, logger, default_prompt_strategy="conversational_chain"
+        )
         self.chat_callback = chat_callback
 
         # Validate API key
@@ -117,7 +124,7 @@ class OpenRouterAgent(VisionAgent):
 
         self.logger.info(
             "OpenRouter agent initialized with model: %s",
-            self.settings.openrouter_model
+            self.settings.openrouter_model,
         )
 
     async def _invoke_model(
@@ -139,7 +146,12 @@ class OpenRouterAgent(VisionAgent):
             reasoning_emitted = await self._extract_and_send_thinking(response)
             action_text = self._parse_response(response, crop_box, full_size)
             reasoning = self._extract_reasoning_from_message(response)
-            return ModelResponse(text=action_text, reasoning=reasoning, raw=response, reasoning_emitted=reasoning_emitted)
+            return ModelResponse(
+                text=action_text,
+                reasoning=reasoning,
+                raw=response,
+                reasoning_emitted=reasoning_emitted,
+            )
         except Exception as exc:
             self.logger.error("OpenRouter API error: %s", exc, exc_info=True)
             return ModelResponse(text=None)
@@ -170,13 +182,17 @@ class OpenRouterAgent(VisionAgent):
                     if not isinstance(item, dict):
                         continue
                     if item.get("type") == "text":
-                        formatted_content.append({"type": "text", "text": item.get("text", "")})
+                        formatted_content.append(
+                            {"type": "text", "text": item.get("text", "")}
+                        )
                     elif item.get("type") == "image" and item.get("image") is not None:
                         base64_image = self._encode_image(item["image"])
                         formatted_content.append(
                             {
                                 "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
                             }
                         )
                 formatted.append({"role": role, "content": formatted_content})
@@ -220,11 +236,12 @@ class OpenRouterAgent(VisionAgent):
             if self.settings.openrouter_reasoning_effort:
                 reasoning_config["effort"] = self.settings.openrouter_reasoning_effort
             payload["reasoning"] = reasoning_config
-            self.logger.info("OpenRouter reasoning enabled with config: %s", reasoning_config)
+            self.logger.info(
+                "OpenRouter reasoning enabled with config: %s", reasoning_config
+            )
 
         self.logger.debug(
-            "Calling OpenRouter API with model: %s",
-            self.settings.openrouter_model
+            "Calling OpenRouter API with model: %s", self.settings.openrouter_model
         )
 
         response = await self.client.post(
@@ -248,7 +265,9 @@ class OpenRouterAgent(VisionAgent):
 
             if not reasoning_details:
                 if self.settings.openrouter_reasoning_enabled:
-                    self.logger.info("OpenRouter reasoning enabled but no reasoning_details returned.")
+                    self.logger.info(
+                        "OpenRouter reasoning enabled but no reasoning_details returned."
+                    )
                 return False
 
             have_details = True
@@ -269,8 +288,12 @@ class OpenRouterAgent(VisionAgent):
                             callback(reasoning_text)
                         emitted = True
                     except Exception as exc:
-                        self.logger.debug("Reasoning callback failed: %s", exc, exc_info=True)
-                self.logger.debug("Received reasoning token: %s chars", len(reasoning_text))
+                        self.logger.debug(
+                            "Reasoning callback failed: %s", exc, exc_info=True
+                        )
+                self.logger.debug(
+                    "Received reasoning token: %s chars", len(reasoning_text)
+                )
 
         except Exception as e:
             self.logger.debug("Failed to extract thinking tokens: %s", e, exc_info=True)
@@ -279,8 +302,9 @@ class OpenRouterAgent(VisionAgent):
 
         return emitted
 
-
-    def _extract_reasoning_from_message(self, response: Dict[str, Any]) -> Optional[str]:
+    def _extract_reasoning_from_message(
+        self, response: Dict[str, Any]
+    ) -> Optional[str]:
         """Best-effort extraction of assistant reasoning text for history tracking."""
         try:
             choice = response.get("choices", [{}])[0]
@@ -306,8 +330,6 @@ class OpenRouterAgent(VisionAgent):
         except Exception:
             return None
         return None
-
-
 
     def _log_reasoning_details(
         self,
@@ -367,7 +389,9 @@ class OpenRouterAgent(VisionAgent):
                         choice.get("reasoning"),
                     )
         except Exception as exc:
-            self.logger.debug("Failed to log reasoning metadata: %s", exc, exc_info=True)
+            self.logger.debug(
+                "Failed to log reasoning metadata: %s", exc, exc_info=True
+            )
 
     def _parse_response(
         self,

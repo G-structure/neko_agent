@@ -13,7 +13,7 @@ from .base import ModelResponse
 from .gpu_agent import GPUAgent
 
 if TYPE_CHECKING:
-    from ..agent_refactored import Settings
+    from ..agent import Settings
 
 
 class ShowUIAgent(GPUAgent):
@@ -32,17 +32,16 @@ class ShowUIAgent(GPUAgent):
         self.logger.info("Loading ShowUI-2B model from %s...", self.settings.repo_id)
 
         # Build model kwargs with device-specific settings
-        model_kwargs: Dict[str, Any] = {
-            "torch_dtype": self.dtype,
-            "device_map": "auto"
-        }
+        model_kwargs: Dict[str, Any] = {"torch_dtype": self.dtype, "device_map": "auto"}
 
         # MPS requires offload configuration
         if self.device == "mps":
-            model_kwargs.update({
-                "offload_folder": self.settings.offload_folder,
-                "offload_state_dict": True
-            })
+            model_kwargs.update(
+                {
+                    "offload_folder": self.settings.offload_folder,
+                    "offload_state_dict": True,
+                }
+            )
 
         # Load model
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -54,15 +53,15 @@ class ShowUIAgent(GPUAgent):
             self.settings.repo_id,
             size={
                 "shortest_edge": self.settings.size_shortest_edge,
-                "longest_edge": self.settings.size_longest_edge
+                "longest_edge": self.settings.size_longest_edge,
             },
-            trust_remote_code=True
+            trust_remote_code=True,
         )
 
         self.logger.info(
             "Model loaded successfully on device: %s (dtype: %s)",
             self.model.device,
-            self.dtype
+            self.dtype,
         )
 
         # Log GPU memory usage
@@ -71,10 +70,7 @@ class ShowUIAgent(GPUAgent):
             self.logger.info("GPU memory allocated: %.2fGB", allocated_memory)
 
     async def _run_inference(
-        self,
-        inputs: Any,
-        max_new_tokens: int = 256,
-        temperature: float = 0.0
+        self, inputs: Any, max_new_tokens: int = 256, temperature: float = 0.0
     ) -> str:
         """Run ShowUI-2B model inference.
 
@@ -83,6 +79,7 @@ class ShowUIAgent(GPUAgent):
         :param temperature: Sampling temperature
         :return: Generated text output
         """
+
         def _inference() -> str:
             with torch.no_grad():
                 t0 = time.monotonic()
@@ -97,7 +94,7 @@ class ShowUIAgent(GPUAgent):
                 self.logger.debug("Inference completed in %.2fs", elapsed)
 
                 output_text = self.processor.decode(
-                    output_ids[0][len(inputs["input_ids"][0]):],
+                    output_ids[0][len(inputs["input_ids"][0]) :],
                     skip_special_tokens=True,
                 ).strip()
                 return output_text
@@ -128,7 +125,11 @@ class ShowUIAgent(GPUAgent):
             if not isinstance(content, list):
                 continue
             for item in content:
-                if isinstance(item, dict) and item.get("type") == "image" and item.get("image") is not None:
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "image"
+                    and item.get("image") is not None
+                ):
                     # Attach expected size metadata for Qwen processor
                     item.setdefault(
                         "size",

@@ -12,7 +12,7 @@ import torch
 from .base import VisionAgent
 
 if TYPE_CHECKING:
-    from ..agent_refactored import Settings
+    from ..agent import Settings
 
 
 class GPUAgent(VisionAgent):
@@ -29,7 +29,7 @@ class GPUAgent(VisionAgent):
     - _run_inference(): Model-specific inference logic
     """
 
-    def __init__(self, settings: 'Settings', logger: logging.Logger):
+    def __init__(self, settings: "Settings", logger: logging.Logger):
         """Initialize GPU agent with device detection and model loading.
 
         :param settings: Configuration settings
@@ -47,8 +47,7 @@ class GPUAgent(VisionAgent):
 
         # Create executor for async inference
         self.executor = ThreadPoolExecutor(
-            max_workers=2,
-            thread_name_prefix="gpu-inference"
+            max_workers=2, thread_name_prefix="gpu-inference"
         )
 
         # Call subclass to load model
@@ -100,10 +99,7 @@ class GPUAgent(VisionAgent):
 
     @abstractmethod
     async def _run_inference(
-        self,
-        inputs: Any,
-        max_new_tokens: int = 256,
-        temperature: float = 0.0
+        self, inputs: Any, max_new_tokens: int = 256, temperature: float = 0.0
     ) -> str:
         """Run model inference (implementation-specific).
 
@@ -131,9 +127,7 @@ class GPUAgent(VisionAgent):
                 info["gpu_memory_total_gb"] = (
                     torch.cuda.get_device_properties(0).total_memory / 1e9
                 )
-                info["gpu_memory_allocated_gb"] = (
-                    torch.cuda.memory_allocated(0) / 1e9
-                )
+                info["gpu_memory_allocated_gb"] = torch.cuda.memory_allocated(0) / 1e9
             except Exception as e:
                 self.logger.debug("Failed to get CUDA info: %s", e)
 
