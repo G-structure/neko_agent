@@ -9,16 +9,49 @@
 
 ## Prerequisites
 
-Before starting development on python-webrtc, ensure submodules are initialized:
+### Repository Structure
+
+The neko_agent repository includes the following submodules in `extern/`:
+
+- **`extern/libwebrtc/`** - Official Google WebRTC M92 source code (git submodule)
+  - Repository: https://webrtc.googlesource.com/src.git
+  - Branch: `branch-heads/4515` (M92 stable)
+  - This is the official C++ WebRTC implementation that python-webrtc binds to
+  - **Important:** This is a large repository (~1.8GB checkout). It's included as reference for development
+
+- **`extern/python-webrtc/`** - The python-webrtc library we're extending (git submodule)
+  - Repository: https://github.com/MarshalX/python-webrtc.git
+  - Provides Python bindings to libwebrtc
+  - See `CMakeLists.txt` line 135: `set(WEBRTC_REVISION branch-heads/4515)` for the libwebrtc version it uses
+
+- **`extern/neko/`** - Neko server reference implementation (git submodule)
+  - Repository: https://github.com/m1k1o/neko.git
+  - Reference for understanding the Neko protocol and server architecture
+
+### Initialize Submodules
+
+Before starting development on python-webrtc, ensure all submodules are initialized:
 
 ```bash
-cd extern/python-webrtc
+# From neko_agent root
 git submodule update --init --recursive
+
+# This fetches:
+# - extern/libwebrtc (~1.8GB - official Google WebRTC M92 source)
+# - extern/python-webrtc (and its third_party/pybind11 dependency)
+# - extern/neko (Neko server reference)
 ```
 
-This fetches `third_party/pybind11` (v2.8) which is required for building the C++ extensions.
+**Note:** The pybind11 submodule in python-webrtc has been updated to use HTTPS instead of SSH for better portability.
 
-**Note:** The pybind11 submodule has been updated to use HTTPS instead of SSH for better portability.
+**Verify submodules:**
+```bash
+git submodule status
+# Should show:
+#  <commit> extern/libwebrtc (heads/branch-heads/4515)
+#  <commit> extern/neko (v3.0.x-...)
+#  <commit> extern/python-webrtc (heads/main)
+```
 
 ---
 

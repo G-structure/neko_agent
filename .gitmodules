@@ -4,3 +4,7 @@
 [submodule "extern/python-webrtc"]
 	path = extern/python-webrtc
 	url = https://github.com/MarshalX/python-webrtc.git
+[submodule "extern/libwebrtc"]
+	path = extern/libwebrtc
+	url = https://webrtc.googlesource.com/src.git
+	branch = branch-heads/4515
