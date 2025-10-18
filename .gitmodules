@@ -4,9 +4,3 @@
 [submodule "extern/python-webrtc"]
 	path = extern/python-webrtc
 	url = https://github.com/MarshalX/python-webrtc.git
-[submodule "extern/opentera-webrtc"]
-	path = extern/opentera-webrtc
-	url = https://github.com/introlab/opentera-webrtc.git
-[submodule "extern/wrtc"]
-	path = extern/wrtc
-	url = https://github.com/MarshalX/python-webrtc.git
