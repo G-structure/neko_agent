@@ -284,3 +284,24 @@ docker-clean:
     docker image prune -a -f
     docker container prune -f
     docker builder prune -a -f
+
+# === python-webrtc build commands ===
+
+# Build python-webrtc wheel (M139)
+build-webrtc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/extern/python-webrtc"
+    pkill -9 ninja || true
+    pkill -9 -f "python -m build" || true
+    sleep 2
+    # Use PARALLELISM from environment if set, otherwise default to 16
+    export PARALLELISM="${PARALLELISM:-16}"
+    nix develop --command bash -c "export PARALLELISM=${PARALLELISM} && python -m build --wheel"
+
+# Clean python-webrtc build artifacts
+clean-webrtc:
+    #!/usr/bin/env bash
+    cd "{{justfile_directory()}}/extern/python-webrtc"
+    rm -rf build/ dist/ third_party/libwebrtc/build third_party/libwebrtc/stamp
+    rm -f *.log
