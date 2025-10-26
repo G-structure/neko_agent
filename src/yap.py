@@ -37,7 +37,7 @@ except ImportError as e:
     print("PyAV (av) is required. pip install av", file=sys.stderr)
     raise
 
-from aiortc import MediaStreamTrack
+from webrtc import MediaStreamTrack
 
 from neko_comms import WebRTCNekoClient, PCMQueue, YAPAudioTrack
 from utils import setup_logging

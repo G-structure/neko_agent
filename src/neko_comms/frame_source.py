@@ -14,7 +14,7 @@ from io import BytesIO
 from typing import Any, Optional
 
 from PIL import Image
-from aiortc import VideoStreamTrack
+from webrtc import MediaStreamTrack
 
 from .types import Frame
 
@@ -70,9 +70,9 @@ class FrameSource(ABC):
 
 
 class WebRTCFrameSource(FrameSource):
-    """Frame source that receives video frames from a WebRTC VideoStreamTrack.
+    """Frame source that receives video frames from a WebRTC MediaStreamTrack.
 
-    This implementation reads frames from an aiortc VideoStreamTrack in a
+    This implementation reads frames from a MediaStreamTrack in a
     background task, converting them to PIL Images and making them available
     for retrieval. It includes frame filtering and error handling.
     """
@@ -92,16 +92,16 @@ class WebRTCFrameSource(FrameSource):
         self.max_size = max_size
 
     async def start(self, *args: Any) -> None:
-        """Start reading frames from a VideoStreamTrack.
+        """Start reading frames from a MediaStreamTrack.
 
-        :param args: Must contain a VideoStreamTrack as the first argument.
+        :param args: Must contain a MediaStreamTrack as the first argument.
         :type args: Any
-        :raises ValueError: If no VideoStreamTrack is provided.
+        :raises ValueError: If no MediaStreamTrack is provided.
         :return: None
         :rtype: None
         """
         if not args:
-            raise ValueError("WebRTCFrameSource.start(): need VideoStreamTrack")
+            raise ValueError("WebRTCFrameSource.start(): need MediaStreamTrack")
         track = args[0]
         await self.stop()
         self._running = True
@@ -174,8 +174,8 @@ class WebRTCFrameSource(FrameSource):
                 )
         return None
 
-    async def _reader(self, track: VideoStreamTrack) -> None:
-        """Background task that reads frames from the VideoStreamTrack."""
+    async def _reader(self, track: MediaStreamTrack) -> None:
+        """Background task that reads frames from the MediaStreamTrack."""
         try:
             while self._running:
                 try:

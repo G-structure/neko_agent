@@ -13,16 +13,16 @@
 
 The neko_agent repository includes the following submodules in `extern/`:
 
-- **`extern/libwebrtc/`** - Official Google WebRTC M92 source code (git submodule)
+- **`extern/libwebrtc/`** - Official Google WebRTC M139 source code (git submodule)
   - Repository: https://webrtc.googlesource.com/src.git
-  - Branch: `branch-heads/4515` (M92 stable)
+  - Branch: `branch-heads/7258` (M139 stable)
   - This is the official C++ WebRTC implementation that python-webrtc binds to
   - **Important:** This is a large repository (~1.8GB checkout). It's included as reference for development
 
 - **`extern/python-webrtc/`** - The python-webrtc library we're extending (git submodule)
   - Repository: https://github.com/MarshalX/python-webrtc.git
   - Provides Python bindings to libwebrtc
-  - See `CMakeLists.txt` line 135: `set(WEBRTC_REVISION branch-heads/4515)` for the libwebrtc version it uses
+  - See `CMakeLists.txt` line 151: `set(WEBRTC_REVISION branch-heads/7258)` for the libwebrtc version it uses
 
 - **`extern/neko/`** - Neko server reference implementation (git submodule)
   - Repository: https://github.com/m1k1o/neko.git
@@ -37,7 +37,7 @@ Before starting development on python-webrtc, ensure all submodules are initiali
 git submodule update --init --recursive
 
 # This fetches:
-# - extern/libwebrtc (~1.8GB - official Google WebRTC M92 source)
+# - extern/libwebrtc (~1.8GB - official Google WebRTC M139 source)
 # - extern/python-webrtc (and its third_party/pybind11 dependency)
 # - extern/neko (Neko server reference)
 ```
@@ -48,7 +48,7 @@ git submodule update --init --recursive
 ```bash
 git submodule status
 # Should show:
-#  <commit> extern/libwebrtc (heads/branch-heads/4515)
+#  <commit> extern/libwebrtc (heads/branch-heads/7258)
 #  <commit> extern/neko (v3.0.x-...)
 #  <commit> extern/python-webrtc (heads/main)
 ```
@@ -76,7 +76,7 @@ git submodule status
 
 ### Current State
 
-**python-webrtc** is a Python extension providing native bindings to libwebrtc M92 (Google's WebRTC implementation). Unlike aiortc (pure Python), it uses the battle-tested C++ WebRTC stack, offering:
+**python-webrtc** is a Python extension providing native bindings to libwebrtc M139 (Google's WebRTC implementation). Unlike aiortc (pure Python), it uses the battle-tested C++ WebRTC stack, offering:
 
 - ✅ True spec compliance (W3C WebRTC specification)
 - ✅ Native performance (C++ codecs, SIMD optimizations)
@@ -128,17 +128,17 @@ from webrtc.aiortc_compat import RTCPeerConnection, MediaStreamTrack
 
 **Primary Repository:**
 - **Main Source:** https://webrtc.googlesource.com/src/
-- **M92 Branch (python-webrtc uses this):** `branch-heads/4515`
-- **Browse Online:** https://chromium.googlesource.com/external/webrtc/+/branch-heads/4515
+- **M139 Branch (python-webrtc uses this):** `branch-heads/7258`
+- **Browse Online:** https://chromium.googlesource.com/external/webrtc/+/branch-heads/7258
 
 **Access via git:**
 ```bash
 # Clone the repository (WARNING: ~15GB download)
 git clone https://webrtc.googlesource.com/src.git webrtc
 
-# Checkout M92 branch
+# Checkout M139 branch
 cd webrtc
-git checkout branch-heads/4515
+git checkout branch-heads/7258
 
 # Or browse specific commit used by python-webrtc
 # Check extern/python-webrtc/CMakeLists.txt for exact version
@@ -309,12 +309,12 @@ python-webrtc wraps libwebrtc APIs using pybind11. Here's how they connect:
 **Preferred Method:** Use the Git web interface
 
 ```
-https://chromium.googlesource.com/external/webrtc/+/branch-heads/4515/api/video/video_sink_interface.h
+https://chromium.googlesource.com/external/webrtc/+/branch-heads/7258/api/video/video_sink_interface.h
 ```
 
 **Format:**
 ```
-https://chromium.googlesource.com/external/webrtc/+/branch-heads/4515/<path-to-file>
+https://chromium.googlesource.com/external/webrtc/+/branch-heads/7258/<path-to-file>
 ```
 
 **Benefits:**
@@ -2550,7 +2550,7 @@ PYBIND11_MODULE(wrtc, m) {
 
 **Source Code:**
 - **Main Repository:** https://webrtc.googlesource.com/src/
-- **M92 Branch (for python-webrtc):** https://chromium.googlesource.com/external/webrtc/+/branch-heads/4515
+- **M139 Branch (for python-webrtc):** https://chromium.googlesource.com/external/webrtc/+/branch-heads/7258
 - **Browse API Headers:** https://webrtc.googlesource.com/src/+/HEAD/native-api.md
 
 **Official Documentation:**
@@ -2570,7 +2570,7 @@ PYBIND11_MODULE(wrtc, m) {
 **Community:**
 - **discuss-webrtc:** https://groups.google.com/g/discuss-webrtc
 - **Release Notes:** https://chromium.googlesource.com/external/webrtc/+/refs/heads/master/docs/release-notes.md
-- **M92 Release Discussion:** https://groups.google.com/g/discuss-webrtc/c/hks5zneZJbo
+- **M139 Release Notes:** https://chromiumdash.appspot.com/schedule (Check milestone 139)
 
 ### python-webrtc Resources
 

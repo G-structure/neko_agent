@@ -13,16 +13,14 @@ import random
 import uuid
 from typing import Optional, Tuple, Dict, Any, List, Callable
 
-from aiortc import (
+from webrtc import (
     RTCConfiguration,
     RTCIceServer,
     RTCPeerConnection,
     RTCSessionDescription,
     RTCIceCandidate,
-    VideoStreamTrack,
-    AudioStreamTrack,
+    MediaStreamTrack,
 )
-from aiortc.sdp import candidate_from_sdp
 from PIL import Image
 import av
 
@@ -79,8 +77,8 @@ class WebRTCNekoClient(NekoClient):
         self.auto_host = kwargs.get("auto_host", True)
 
         # Video track and frame handling
-        self._video_track: Optional[VideoStreamTrack] = None
-        self._audio_track: Optional[AudioStreamTrack] = None
+        self._video_track: Optional[MediaStreamTrack] = None
+        self._audio_track: Optional[MediaStreamTrack] = None
         self._last_frame: Optional[Frame] = None
         self._frame_event = asyncio.Event()
         self._ice_candidates_buffer: List[RTCIceCandidate] = []
@@ -97,7 +95,7 @@ class WebRTCNekoClient(NekoClient):
         self._system_event_listeners: List[Callable[[Dict[str, Any]], Any]] = []
 
         # Custom audio track for outbound audio (yap.py support)
-        self._outbound_audio_track: Optional[AudioStreamTrack] = None
+        self._outbound_audio_track: Optional[MediaStreamTrack] = None
 
     async def connect(self) -> None:
         """Establish WebRTC and WebSocket connections to the Neko server.
@@ -191,7 +189,7 @@ class WebRTCNekoClient(NekoClient):
         if not self.pc:
             return True
 
-        state = getattr(self.pc, "connectionState", None)
+        state = getattr(self.pc, "connection_state", None)
         if state in ("closed", "failed"):
             return False
 
@@ -277,12 +275,12 @@ class WebRTCNekoClient(NekoClient):
         self.pc = RTCPeerConnection(config)
         self.pc.on("icecandidate", self._on_ice_candidate)
         self.pc.on("track", self._on_track)
-        self.pc.on("iceconnectionstatechange", lambda: logger.info("iceConnectionState -> %s", self.pc.iceConnectionState))
-        self.pc.on("connectionstatechange", lambda: logger.info("connectionState -> %s", self.pc.connectionState))
+        self.pc.on("iceconnectionstatechange", lambda: logger.info("iceConnectionState -> %s", self.pc.ice_connection_state))
+        self.pc.on("connectionstatechange", lambda: logger.info("connectionState -> %s", self.pc.connection_state))
 
         if self._outbound_audio_track:
             try:
-                self.pc.addTrack(self._outbound_audio_track)
+                self.pc.add_track(self._outbound_audio_track)
                 logger.info("Attached outbound audio track to peer connection")
             except Exception as exc:
                 logger.warning("Failed to attach outbound audio track: %s", exc)
@@ -394,7 +392,7 @@ class WebRTCNekoClient(NekoClient):
                 return
 
             need_reset = False
-            if not self.pc or getattr(self.pc, "connectionState", None) in {"closed", "failed"}:
+            if not self.pc or getattr(self.pc, "connection_state", None) in {"closed", "failed"}:
                 need_reset = True
 
             if not self._remote_description_set:
@@ -414,15 +412,16 @@ class WebRTCNekoClient(NekoClient):
 
             sdp = payload.get("sdp")
             if sdp and self.pc:
-                await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+                # Native WebRTC handles TCP candidates properly, no need to filter
+                await self.pc.set_remote_description(RTCSessionDescription(sdp=sdp, type="offer"))
                 self._remote_description_set = True
 
                 for candidate in self._ice_candidates_buffer:
-                    await self.pc.addIceCandidate(candidate)
+                    await self.pc.add_ice_candidate(candidate)
                 self._ice_candidates_buffer.clear()
 
-                answer = await self.pc.createAnswer()
-                await self.pc.setLocalDescription(answer)
+                answer = await self.pc.create_answer()
+                await self.pc.set_local_description(answer)
 
                 await self.signaler.send({
                     "event": "signal/answer",
@@ -432,7 +431,7 @@ class WebRTCNekoClient(NekoClient):
         elif event == "signal/answer":
             sdp = payload.get("sdp")
             if sdp and self.pc:
-                await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
+                await self.pc.set_remote_description(RTCSessionDescription(sdp=sdp, type="answer"))
                 self._remote_description_set = True
 
         elif event == "signal/close":
@@ -446,12 +445,15 @@ class WebRTCNekoClient(NekoClient):
 
         if candidate_str and self.pc:
             try:
-                candidate = candidate_from_sdp(candidate_str)
-                candidate.sdpMid = payload.get("sdpMid")
-                candidate.sdpMLineIndex = payload.get("sdpMLineIndex")
+                # python-webrtc RTCIceCandidate constructor takes candidate, sdpMid, sdpMLineIndex
+                candidate = RTCIceCandidate(
+                    candidate=candidate_str.replace("candidate:", ""),  # Remove "candidate:" prefix if present
+                    sdp_mid=payload.get("sdpMid"),
+                    sdp_m_line_index=payload.get("sdpMLineIndex")
+                )
 
                 if self._remote_description_set:
-                    await self.pc.addIceCandidate(candidate)
+                    await self.pc.add_ice_candidate(candidate)
                 else:
                     # Buffer candidates until remote description is set
                     self._ice_candidates_buffer.append(candidate)
@@ -466,8 +468,8 @@ class WebRTCNekoClient(NekoClient):
                 "event": "signal/candidate",
                 "payload": {
                     "candidate": f"candidate:{candidate.candidate}",
-                    "sdpMid": candidate.sdpMid,
-                    "sdpMLineIndex": candidate.sdpMLineIndex,
+                    "sdpMid": candidate.sdp_mid,
+                    "sdpMLineIndex": candidate.sdp_m_line_index,
                 }
             })
 
@@ -718,34 +720,34 @@ class WebRTCNekoClient(NekoClient):
         if self.signaler:
             await self.send_event("system/heartbeat")
 
-    def add_outbound_audio_track(self, audio_track: AudioStreamTrack) -> None:
+    def add_outbound_audio_track(self, audio_track: MediaStreamTrack) -> None:
         """Add an outbound audio track (for yap.py TTS support).
 
         :param audio_track: The audio track to add
-        :type audio_track: AudioStreamTrack
+        :type audio_track: MediaStreamTrack
         :return: None
         :rtype: None
         """
         self._outbound_audio_track = audio_track
         if self.pc:
-            self.pc.addTrack(audio_track)
+            self.pc.add_track(audio_track)
             logger.info("Added outbound audio track")
         else:
             logger.debug("Stored outbound audio track for later peer connection attachment")
 
-    def get_video_track(self) -> Optional[VideoStreamTrack]:
+    def get_video_track(self) -> Optional[MediaStreamTrack]:
         """Get the current video track.
 
         :return: The video track if available
-        :rtype: Optional[VideoStreamTrack]
+        :rtype: Optional[MediaStreamTrack]
         """
         return self._video_track
 
-    def get_audio_track(self) -> Optional[AudioStreamTrack]:
+    def get_audio_track(self) -> Optional[MediaStreamTrack]:
         """Get the current audio track.
 
         :return: The audio track if available
-        :rtype: Optional[AudioStreamTrack]
+        :rtype: Optional[MediaStreamTrack]
         """
         return self._audio_track
 
@@ -779,8 +781,8 @@ class WebRTCNekoClient(NekoClient):
         if not self.pc or not self.signaler:
             return
 
-        offer = await self.pc.createOffer()
-        await self.pc.setLocalDescription(offer)
+        offer = await self.pc.create_offer()
+        await self.pc.set_local_description(offer)
 
         await self.signaler.send({
             "event": "signal/offer",

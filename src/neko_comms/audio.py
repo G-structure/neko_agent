@@ -16,7 +16,7 @@ try:
 except ImportError as e:
     raise ImportError("PyAV (av) is required. pip install av") from e
 
-from aiortc import MediaStreamTrack
+from webrtc import MediaStreamTrack
 
 
 class PCMQueue:
@@ -99,7 +99,7 @@ class PCMQueue:
 
 
 class YAPAudioTrack(MediaStreamTrack):
-    """Custom aiortc audio track that pulls from a PCMQueue at fixed frame size."""
+    """Custom audio track that pulls from a PCMQueue at fixed frame size."""
     kind = "audio"
 
     def __init__(self, pcmq: PCMQueue, frame_ms: int):
@@ -116,7 +116,7 @@ class YAPAudioTrack(MediaStreamTrack):
     async def recv(self) -> av.AudioFrame:
         """Receive audio frame from PCM queue for WebRTC transmission.
 
-        :return: Audio frame for aiortc
+        :return: Audio frame for WebRTC
         """
         samples = self.q.pull(self.frame_samples)  # (N, C) int16
         layout = "mono" if samples.shape[1] == 1 else "stereo"

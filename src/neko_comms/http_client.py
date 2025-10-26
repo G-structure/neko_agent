@@ -18,6 +18,7 @@ import io
 
 from .base import NekoClient
 from .types import Action, Frame, ConnectionState
+from .frame_source import FrameSource
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,10 @@ class HTTPNekoClient(NekoClient):
         # Frame polling
         self._last_frame: Optional[Frame] = None
         self._frame_event = asyncio.Event()
+        self._polling_task: Optional[asyncio.Task] = None
+
+        # Frame source wrapper for compatibility with WebRTCNekoClient
+        self.frame_source = self._create_frame_source()
 
     async def connect(self) -> None:
         """Establish connection to the Neko server via HTTP/WebSocket.
@@ -85,6 +90,9 @@ class HTTPNekoClient(NekoClient):
             # Start WebSocket connection
             await self._connect_websocket()
 
+            # Start screenshot polling task
+            self._polling_task = asyncio.create_task(self._poll_screenshots())
+
             self._connection_state = ConnectionState.CONNECTED
             logger.info("HTTP Neko client connected successfully")
 
@@ -100,6 +108,14 @@ class HTTPNekoClient(NekoClient):
         :rtype: None
         """
         self._connection_state = ConnectionState.DISCONNECTED
+
+        # Stop polling task
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
 
         # Stop WebSocket
         self._stop_event.set()
@@ -152,6 +168,34 @@ class HTTPNekoClient(NekoClient):
             return self._last_frame
         except asyncio.TimeoutError:
             return None
+
+    async def wait_for_track(self, timeout: float = 30.0) -> bool:
+        """Wait for video track (compatibility method for HTTP client).
+
+        For HTTP client, we just wait for the first screenshot to be captured.
+
+        :param timeout: Maximum time to wait in seconds.
+        :type timeout: float
+        :return: Always True for HTTP client (no track needed).
+        :rtype: bool
+        """
+        # Wait for first screenshot to be captured
+        try:
+            await asyncio.wait_for(self._frame_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def wait_for_frame(self, timeout: float = 20.0) -> Optional[Image.Image]:
+        """Wait for the next frame (compatibility method).
+
+        :param timeout: Maximum time to wait in seconds.
+        :type timeout: float
+        :return: The next frame as PIL Image, or None if timeout.
+        :rtype: Optional[Image.Image]
+        """
+        frame = await self.recv_frame(timeout=timeout)
+        return frame.data if frame else None
 
     async def publish_topic(self, topic: str, data: Dict[str, Any]) -> None:
         """Publish a message to a specific topic.
@@ -254,6 +298,67 @@ class HTTPNekoClient(NekoClient):
     def stop(self) -> None:
         """Stop screenshot polling and other background operations."""
         self._stop_event.set()
+
+    async def _poll_screenshots(self) -> None:
+        """Background task to poll screenshots at regular intervals."""
+        fps = 2.0  # Poll at 2 FPS
+        interval = 1.0 / fps
+
+        while self.is_connected():
+            try:
+                start_time = asyncio.get_event_loop().time()
+
+                # Get screenshot via HTTP
+                img = self.get_screenshot(jpeg_quality=85)
+                if img:
+                    # Update last frame
+                    self._last_frame = Frame(
+                        data=img,
+                        timestamp=asyncio.get_event_loop().time(),
+                        width=img.width,
+                        height=img.height
+                    )
+                    self._frame_size = (img.width, img.height)
+                    self._frame_event.set()
+
+                # Sleep for remaining interval time
+                elapsed = asyncio.get_event_loop().time() - start_time
+                sleep_time = max(0, interval - elapsed)
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+
+            except Exception as e:
+                logger.error("Error polling screenshot: %s", e)
+                await asyncio.sleep(interval)
+
+    def _create_frame_source(self) -> FrameSource:
+        """Create a frame source wrapper for compatibility with WebRTCNekoClient."""
+        class HTTPFrameSource(FrameSource):
+            def __init__(self, client):
+                self.client = client
+
+            async def start(self, *args):
+                pass  # Polling is started automatically in connect()
+
+            async def stop(self):
+                pass  # Polling is stopped automatically in disconnect()
+
+            async def get(self):
+                if self.client._last_frame:
+                    return self.client._last_frame.data
+                return None
+
+            async def wait_for_frame(self, timeout: float = 5.0):
+                try:
+                    await asyncio.wait_for(self.client._frame_event.wait(), timeout=timeout)
+                    self.client._frame_event.clear()
+                    if self.client._last_frame:
+                        return self.client._last_frame.data
+                except asyncio.TimeoutError:
+                    pass
+                return None
+
+        return HTTPFrameSource(self)
 
     async def _authenticate_rest(self) -> None:
         """Authenticate via REST API and obtain token."""

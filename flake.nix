@@ -373,8 +373,8 @@
             ps.tenacity
           ];
 
-          # From-source Python env with PyTorch
-          pyEnvGeneric = pkgs.python3.withPackages (ps: [
+          # From-source Python env with PyTorch (pin to 3.11 for torch compatibility)
+          pyEnvGeneric = pkgs.python311.withPackages (ps: [
             ps.torch
             ps.torchvision
             ps.torchaudio

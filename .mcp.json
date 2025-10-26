@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "cclsp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "cclsp"
+      ]
+    },
+    "ruff-analyzer": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-analyzer"
+      ]
+    }
+  }
+}

@@ -29,15 +29,19 @@ from distutils.util import strtobool
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from dotenv import load_dotenv
 from PIL import Image
 from metrics import (
     frames_received, actions_executed, navigation_steps,
     inference_latency, reconnects, resize_duration, start_metrics_server
 )
 
+# Load environment variables from .env file
+load_dotenv()
+
 from agents import VisionAgent
 from agents.reasoning import strip_think_segments
-from neko_comms import WebRTCNekoClient
+from neko_comms import WebRTCNekoClient, HTTPNekoClient
 from neko_comms.types import ACTION_SPACES, Action as ActionModel
 from utils import setup_logging, resize_and_validate_image, save_atomic, draw_action_markers
 
@@ -67,6 +71,7 @@ class Settings:
 
     # Network configuration
     default_ws: Optional[str]
+    neko_client_type: str
     neko_ice_policy: str
     neko_stun_url: str
     neko_turn_url: Optional[str]
@@ -151,6 +156,7 @@ class Settings:
             size_shortest_edge=int(os.environ.get("SIZE_SHORTEST_EDGE", "224")),
             size_longest_edge=int(os.environ.get("SIZE_LONGEST_EDGE", "1344")),
             default_ws=os.environ.get("NEKO_WS"),
+            neko_client_type=os.environ.get("NEKO_CLIENT_TYPE", "webrtc"),
             neko_ice_policy=os.environ.get("NEKO_ICE_POLICY", "strict"),
             neko_stun_url=os.environ.get("NEKO_STUN_URL", "stun:stun.l.google.com:19302"),
             neko_turn_url=os.environ.get("NEKO_TURN_URL"),
@@ -302,6 +308,9 @@ class NekoAgent:
         metrics_port: Optional[int] = None,
         audio: Optional[bool] = None,
         online: bool = False,
+        base_url: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         """Initialize the Neko agent.
 
@@ -338,26 +347,38 @@ class NekoAgent:
         self._is_running_task = False
         self._pending_task: Optional[str] = None
 
-        # WebRTC client configuration mirrors the legacy agent defaults
-        ice_servers: List[Any] = []
-        if self.settings.neko_stun_url:
-            ice_servers.append(self.settings.neko_stun_url)
-        if self.settings.neko_turn_url:
-            turn_entry: Dict[str, Any] = {"urls": self.settings.neko_turn_url}
-            if self.settings.neko_turn_user and self.settings.neko_turn_pass:
-                turn_entry["username"] = self.settings.neko_turn_user
-                turn_entry["credential"] = self.settings.neko_turn_pass
-            ice_servers.append(turn_entry)
+        # Choose client type based on configuration
+        if self.settings.neko_client_type == "http":
+            # HTTP screenshot polling client
+            self.client = HTTPNekoClient(
+                base_url=base_url,
+                ws_url=ws_url,
+                username=username,
+                password=password,
+            )
+            self.logger.info("Using HTTP screenshot polling client")
+        else:
+            # WebRTC client configuration mirrors the legacy agent defaults
+            ice_servers: List[Any] = []
+            if self.settings.neko_stun_url:
+                ice_servers.append(self.settings.neko_stun_url)
+            if self.settings.neko_turn_url:
+                turn_entry: Dict[str, Any] = {"urls": self.settings.neko_turn_url}
+                if self.settings.neko_turn_user and self.settings.neko_turn_pass:
+                    turn_entry["username"] = self.settings.neko_turn_user
+                    turn_entry["credential"] = self.settings.neko_turn_pass
+                ice_servers.append(turn_entry)
 
-        self.client = WebRTCNekoClient(
-            ws_url=ws_url,
-            ice_servers=ice_servers,
-            ice_policy=self.settings.neko_ice_policy,
-            enable_audio=self.audio_enabled,
-            rtcp_keepalive=self.settings.neko_rtcp_keepalive,
-            auto_host=True,
-            request_media=True,
-        )
+            self.client = WebRTCNekoClient(
+                ws_url=ws_url,
+                ice_servers=ice_servers,
+                ice_policy=self.settings.neko_ice_policy,
+                enable_audio=self.audio_enabled,
+                rtcp_keepalive=self.settings.neko_rtcp_keepalive,
+                auto_host=True,
+                request_media=True,  # Request WebRTC media
+            )
+            self.logger.info("Using WebRTC client")
 
         # Metrics server handles (injected by main)
         self._metrics_server = None
@@ -1055,6 +1076,9 @@ async def main() -> None:
         metrics_port=metrics_port,
         audio=args.audio,
         online=args.online,
+        base_url=args.neko_url.rstrip("/") if args.neko_url else None,
+        username=args.username,
+        password=args.password,
     )
 
     # Inject metrics server handles for clean shutdown
