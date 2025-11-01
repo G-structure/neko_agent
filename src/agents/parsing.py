@@ -84,6 +84,10 @@ def safe_parse_action(
     try:
         assert isinstance(act, dict)
         typ = act.get("action")
+        # Normalize action to uppercase for validation
+        if isinstance(typ, str):
+            typ = typ.upper()
+            act["action"] = typ
         if typ in COMPLETION_ACTIONS:
             act.setdefault("value", None)
             act.setdefault("position", None)
