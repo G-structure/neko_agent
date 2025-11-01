@@ -421,6 +421,10 @@ class WebRTCNekoClient(NekoClient):
         for idx, transceiver in enumerate(transceivers):
             logger.debug("Transceiver %d: kind=%s, direction=%s, mid=%s",
                         idx, transceiver.kind, transceiver.direction, transceiver.mid)
+            # Disable inbound audio to prevent decoder errors (we only send audio via yap.py)
+            if transceiver.kind == "audio" and transceiver.direction == "recvonly":
+                transceiver.direction = "inactive"
+                logger.info("Disabled inbound audio transceiver to prevent decoder thread")
 
         # Apply early ICE candidates buffered before PC creation
         if early_ice_candidates:
@@ -703,7 +707,7 @@ class WebRTCNekoClient(NekoClient):
                 logger.warning("Received video track but frame source is not WebRTCFrameSource")
         elif track.kind == "audio":
             self._audio_track = track
-            logger.info("Received audio track")
+            logger.info("Received audio track (decoder disabled)")
 
     async def setup_video_lite(self) -> None:
         """Set up video_lite mode for base64-encoded frames over WebSocket."""
